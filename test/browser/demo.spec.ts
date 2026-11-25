@@ -275,3 +275,26 @@ test('a scrolled-up conversation can jump to the latest message', async ({ page 
   await expect(page.getByText('Reply 24')).toBeInViewport();
   await expect(jump).toHaveCount(0);
 });
+
+test('hosted voice startup blocks the workspace until ready and can be retried', async ({ page }) => {
+  let checks = 0;
+  await page.route('**/api/support?*', route => {
+    const action = new URL(route.request().url()).searchParams.get('action');
+    if (action === 'session') return route.fulfill({ json: { turns: [], warmVoice: true } });
+    if (action === 'voice-ready') {
+      checks++;
+      return checks === 1
+        ? route.fulfill({ status: 503, json: { message: 'Not ready' } })
+        : route.fulfill({ json: { ready: true } });
+    }
+    return route.fulfill({ json: {} });
+  });
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Voice service unavailable' })).toBeVisible();
+  await expect(page.getByRole('textbox', { name: 'Your message' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Start voice' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Retry startup' }).click();
+  await expect(page.getByRole('textbox', { name: 'Your message' })).toBeEditable();
+  await expect(page.getByRole('button', { name: 'Start voice' })).toBeEnabled();
+  expect(checks).toBe(2);
+});

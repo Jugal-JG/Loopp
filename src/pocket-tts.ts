@@ -1,3 +1,31 @@
+import { setTimeout as delay } from 'node:timers/promises';
+
+export function hostedPocketHealthUrl() {
+  const synthesisUrl = process.env.POCKET_TTS_URL;
+  if (!synthesisUrl) return undefined;
+  const url = new URL(synthesisUrl);
+  return url.protocol === 'https:' ? new URL('/health', url.origin) : undefined;
+}
+
+export async function waitForPocketSpeech(url: URL) {
+  const signal = AbortSignal.timeout(40_000);
+  while (!signal.aborted) {
+    try {
+      const response = await fetch(url, { signal, redirect: 'error', cache: 'no-store' });
+      if (response.ok) {
+        const result = await response.json();
+        if (result?.status === 'ready' || result?.status === 'healthy') return true;
+      } else {
+        await response.body?.cancel();
+      }
+    } catch {
+      // Free hosts can return an error while their container starts.
+    }
+    await delay(2_000, undefined, { signal }).catch(() => {});
+  }
+  return false;
+}
+
 export async function pocketSpeech(text: string, onAudio: (data: string, mime: string) => boolean, signal: AbortSignal) {
   const url = process.env.POCKET_TTS_URL || 'http://127.0.0.1:8000/tts';
   const body = new URLSearchParams({ text });

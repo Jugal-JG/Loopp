@@ -23,6 +23,7 @@ async function apiResponse(response: Response) {
 
 function App() {
   const [auth, setAuth] = useState<'checking' | 'signedOut' | 'ready'>('checking');
+  const [voiceReadiness, setVoiceReadiness] = useState<'ready' | 'warming' | 'failed'>('ready');
   const [passcode, setPasscode] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [email, setEmail] = useState('');
@@ -61,6 +62,7 @@ function App() {
       setPending(result.pending);
       setIdentity(result.identity ?? { admin: false });
       if (result.identity?.profile) setProfile(result.identity.profile);
+      setVoiceReadiness(result.warmVoice ? 'warming' : 'ready');
       setAuth('ready');
     } catch (error) { setStatus((error as Error).message); setAuth('signedOut'); }
   }
@@ -73,6 +75,20 @@ function App() {
   useEffect(() => {
     if (!showScrollDown && feed.current) feed.current.scrollTop = feed.current.scrollHeight;
   }, [turns, partial, showScrollDown]);
+
+  useEffect(() => {
+    if (auth !== 'ready' || voiceReadiness !== 'warming') return;
+    const controller = new AbortController();
+    void fetch(endpoint('voice-ready'), { signal: controller.signal })
+      .then(apiResponse)
+      .then(result => {
+        if (!controller.signal.aborted) setVoiceReadiness(result.ready === true ? 'ready' : 'failed');
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setVoiceReadiness('failed');
+      });
+    return () => controller.abort();
+  }, [auth, voiceReadiness]);
 
   async function login(event: FormEvent) {
     event.preventDefault();
@@ -233,7 +249,7 @@ function App() {
   const estimatedCost = recordedCosts.reduce((total, cost) => total + cost, 0);
   return <main>
     <header><div className="brand"><span className="logo" aria-hidden="true">L</span><div><strong>Loopp</strong><small>Support workspace</small></div></div>
-      {auth === 'ready' && <nav className="header-actions">{identity.admin && <button className="secondary" onClick={() => {
+      {auth === 'ready' && voiceReadiness === 'ready' && <nav className="header-actions">{identity.admin && <button className="secondary" onClick={() => {
         if (!showTickets && (voice.current || voiceStart.current)) void toggleVoice();
         setShowTickets(!showTickets);
       }}>{showTickets ? 'Back to chat' : 'Human escalations'}</button>}
@@ -257,6 +273,12 @@ function App() {
         <button disabled={auth === 'checking'}>{email ? 'Sign in as admin' : 'Open demo'}</button>
       </form>
       {status && <p role="alert" className="notice">{status}</p>}
+    </section> : voiceReadiness !== 'ready' ? <section className="gate" aria-labelledby="warmup-heading">
+      <h1 id="warmup-heading">{voiceReadiness === 'warming' ? 'Starting Loopp' : 'Voice service unavailable'}</h1>
+      {voiceReadiness === 'warming'
+        ? <p role="status">Voice is waking up on free hosting. The workspace will open when it’s ready.</p>
+        : <><p role="alert">The voice service took too long to start. Try again to open the workspace.</p>
+          <button type="button" onClick={() => setVoiceReadiness('warming')}>Retry startup</button></>}
     </section> : showTickets ? <Tickets /> : <div className={drawer ? 'workspace expanded' : 'workspace'}>
       <section className="conversation" aria-label="Support conversation">
         <div className="toolbar"><div><h1>Help Desk</h1><small>Fictional customer support</small></div><button className="secondary" disabled={busy || !turns.length} onClick={() => void clearChat()}>Clear chat</button><label>{identity.profile ? 'Your plan' : 'Demo account'}<select value={profile} disabled={busy || !!identity.profile} onChange={event => setProfile(event.target.value as Profile)}><option value="pro">Pro · monthly</option><option value="basic">Basic · monthly</option><option value="annual">Pro · expired annual</option></select></label></div>

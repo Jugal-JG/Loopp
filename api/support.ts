@@ -5,7 +5,7 @@ import { decide, isRateLimit, ServiceError, voiceToken, textModel, verifyEvidenc
 import { accounts, runSupportTurn, type Pending, type Profile, type Reply } from '../src/agent.js';
 import { adminEmail, cookie, googleEnabled, googleFinish, googleProfile, googleStart, isAdmin, readCookie, secretMatches } from '../src/identity.js';
 import { deliverEmail, emailConfigured } from '../src/notifications.js';
-import { pocketSpeech } from '../src/pocket-tts.js';
+import { hostedPocketHealthUrl, pocketSpeech, waitForPocketSpeech } from '../src/pocket-tts.js';
 import { estimateApiCost } from '../src/api-cost.js';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -201,10 +201,17 @@ async function handle(req: IncomingMessage, res: ServerResponse, services: typeo
       if (!cleared.rowCount) throw new ServiceError('turn_busy', 409);
       return json(res, 200, { ok: true });
     }
+    if (action === 'voice-ready' && req.method === 'GET') {
+      const healthUrl = hostedPocketHealthUrl();
+      if (!healthUrl) return json(res, 200, { ready: true });
+      await takeBudget(`voice-ready:${session.id}`, 3);
+      if (await waitForPocketSpeech(healthUrl)) return json(res, 200, { ready: true });
+      return json(res, 503, { message: 'The voice service did not become ready in time.' });
+    }
     if (action === 'session' && req.method === 'GET') {
       const result = await db().query<Turn>(`SELECT * FROM (SELECT id,message,mode,profile,reply,traces,created_at
         FROM support_turns WHERE session_id=$1 ORDER BY created_at DESC LIMIT 40) history ORDER BY created_at`, [session.id]);
-      return json(res, 200, { turns: result.rows, pending: session.pending?.profile, identity: { admin: session.admin, profile: session.profile } });
+      return json(res, 200, { turns: result.rows, pending: session.pending?.profile, warmVoice: Boolean(hostedPocketHealthUrl()), identity: { admin: session.admin, profile: session.profile } });
     }
     if (action === 'voice' && req.method === 'POST') {
       await takeBudget(`voice:${session.id}`, 3);
