@@ -64,6 +64,21 @@ export function Tickets() {
     } catch (problem) { setError((problem as Error).message); }
     finally { setReviewing(''); }
   }
+  async function deleteTicket(reference: string) {
+    if (!window.confirm(`Delete ticket ${reference} from the escalation inbox?`)) return;
+    setReviewing(reference);
+    setError('');
+    setNotice('');
+    try {
+      const response = await fetch(endpoint + 'delete-ticket', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reference }),
+      });
+      if (!response.ok) throw new Error((await response.json().catch(() => null))?.message ?? 'Could not delete this ticket.');
+      setTickets(items => items?.filter(ticket => ticket.reference !== reference));
+      setNotice(`Ticket ${reference} deleted.`);
+    } catch (problem) { setError((problem as Error).message); }
+    finally { setReviewing(''); }
+  }
 
   return <section className="ticket-panel" aria-label="Human escalations">
     <div className="toolbar"><div><h1>Human escalations</h1><small>Customer tickets</small></div>
@@ -73,7 +88,9 @@ export function Tickets() {
     {!tickets && !error && <p>Loading tickets…</p>}
     {tickets?.length === 0 && <p>No escalations yet.</p>}
     {tickets?.map(ticket => <article className="ticket" key={ticket.reference}>
-      <div className="ticket-heading"><strong>{ticket.reference}</strong><span className="source">{ticket.status}</span></div>
+      <div className="ticket-heading"><strong>{ticket.reference}</strong><span className="source">{ticket.status}</span>
+        <button className="secondary ticket-delete" type="button" aria-label={`Delete ticket ${ticket.reference}`} disabled={!!reviewing}
+          onClick={() => void deleteTicket(ticket.reference)}>Delete</button></div>
       <p>{ticket.request_text ?? 'Customer message unavailable'}</p>
       <small>{ticket.profile} · {ticket.reason.replaceAll('_', ' ')} · {new Date(ticket.created_at).toLocaleString()}</small>
       {ticket.email && <p><small>{ticket.email}</small></p>}

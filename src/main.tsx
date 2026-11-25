@@ -24,6 +24,7 @@ async function apiResponse(response: Response) {
 function App() {
   const [auth, setAuth] = useState<'checking' | 'signedOut' | 'ready'>('checking');
   const [passcode, setPasscode] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [email, setEmail] = useState('');
   const [identity, setIdentity] = useState<{ admin: boolean; profile?: Profile }>({ admin: false });
   const [authOptions, setAuthOptions] = useState({ google: false, admin: false });
@@ -78,6 +79,7 @@ function App() {
       const response = await fetch(endpoint('login'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, passcode }) });
       await apiResponse(response);
       setPasscode('');
+      setShowPassword(false);
       await load();
     } catch (error) { setStatus((error as Error).message); setAuth('signedOut'); }
   }
@@ -235,11 +237,22 @@ function App() {
         {!showTickets && <button className="secondary" onClick={() => setDrawer(!drawer)} aria-expanded={drawer}>Observability</button>}
         <button className="secondary" onClick={() => void logout()}>Sign out</button></nav>}
     </header>
-    {auth !== 'ready' ? <section className="gate">
-      <h1>Loopp Help Desk</h1><p>Sign in to open the support workspace.</p>
-      {authOptions.google && <p><a href={endpoint('google')}>Continue with Google</a></p>}
-      <form onSubmit={login}>{authOptions.admin && <><label htmlFor="admin-email">Admin email (optional for demo access)</label><input id="admin-email" type="email" autoComplete="username" value={email} onChange={event => setEmail(event.target.value)} /></>}
-        <label htmlFor="passcode">{email ? 'Admin password' : 'Passcode'}</label><input id="passcode" type="password" autoComplete="current-password" value={passcode} onChange={event => setPasscode(event.target.value)} required /><button disabled={auth === 'checking'}>{email ? 'Sign in as admin' : 'Open demo'}</button></form>
+    {auth !== 'ready' ? <section className="gate" aria-labelledby="login-heading">
+      <h1 id="login-heading">Sign in to Loopp</h1>
+      {authOptions.google && <>
+        <div className="google-sign-in">
+          <a href={endpoint('google')}><img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" width="20" height="20" alt="" />Continue with Google</a>
+        </div>
+        <div className="login-divider">or use a passcode</div>
+      </>}
+      <form onSubmit={login}>{authOptions.admin && <><label htmlFor="admin-email">Admin email <small>Leave blank for demo access</small></label><input id="admin-email" type="email" autoComplete="username" value={email} onChange={event => setEmail(event.target.value)} /></>}
+        <label htmlFor="passcode">{email ? 'Admin password' : 'Passcode'}</label>
+        <div className="password-field">
+          <input id="passcode" type={showPassword ? 'text' : 'password'} autoComplete="current-password" value={passcode} onChange={event => setPasscode(event.target.value)} required />
+          <button type="button" className="password-toggle" aria-controls="passcode" aria-label={showPassword ? 'Hide password' : 'Show password'} onClick={() => setShowPassword(!showPassword)}>{showPassword ? 'Hide' : 'Show'}</button>
+        </div>
+        <button disabled={auth === 'checking'}>{email ? 'Sign in as admin' : 'Open demo'}</button>
+      </form>
       {status && <p role="alert" className="notice">{status}</p>}
     </section> : showTickets ? <Tickets /> : <div className={drawer ? 'workspace expanded' : 'workspace'}>
       <section className="conversation" aria-label="Support conversation">

@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS tickets (
 ALTER TABLE tickets ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','accepted','rejected'));
 ALTER TABLE tickets ADD COLUMN IF NOT EXISTS reviewed_at timestamptz;
 ALTER TABLE tickets ADD COLUMN IF NOT EXISTS request_text text;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
 CREATE TABLE IF NOT EXISTS ticket_messages (
   id uuid PRIMARY KEY, reference text NOT NULL REFERENCES tickets(reference),
   body text NOT NULL, created_at timestamptz NOT NULL DEFAULT now()

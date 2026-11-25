@@ -136,6 +136,11 @@ test('local HTTP, SSE, pgvector ranking, session reload, recovery, tickets and e
     assert.equal((await fetchPost('reply-ticket', answer, adminCookie)).status, 200);
     assert.equal((await db().query('SELECT count(*)::int AS count FROM ticket_messages')).rows[0].count, 1);
     assert.equal((await db().query('SELECT count(*)::int AS count FROM ticket_email')).rows[0].count, 2);
+    assert.equal((await fetchPost('delete-ticket', { reference: ticket.reference }, cookie)).status, 403);
+    assert.equal((await fetchPost('delete-ticket', { reference: ticket.reference }, adminCookie)).status, 200);
+    const afterDelete = await (await fetch(endpoint + 'tickets', { headers: { Cookie: adminCookie } })).json();
+    assert.deepEqual(afterDelete.tickets, []);
+    assert.equal((await fetchPost('reply-ticket', { ...answer, id: randomUUID() }, adminCookie)).status, 404);
     assert.match((await turn('Where is my receipt?', 'chat', randomUUID(), 'rate')).reply.text, /rate limited/);
     assert.match((await turn('Where is my receipt?', 'chat', randomUUID(), 'tool')).reply.text, /simulated tool failed/);
     const rejected = await fetchPost('turn', { id: randomUUID(), message: 'Where is my receipt?', mode: 'chat', profile: 'pro' }, cookie);

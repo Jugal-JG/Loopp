@@ -123,13 +123,20 @@ async function handle(req: IncomingMessage, res: ServerResponse, services: typeo
       res.setHeader('Set-Cookie', cookie('loopp', '', 0, secure));
       return json(res, 200, { ok: true });
     }
-    if (['tickets', 'review-ticket', 'reply-ticket', 'retry-email'].includes(action) && !session.admin) throw new ServiceError('admin_required', 403);
+    if (['tickets', 'review-ticket', 'reply-ticket', 'retry-email', 'delete-ticket'].includes(action) && !session.admin) throw new ServiceError('admin_required', 403);
     if (action === 'tickets' && req.method === 'GET') {
       const result = await db().query(`SELECT t.reference,t.reason,t.profile,t.status,t.created_at,t.reviewed_at,t.request_text,s.email,
           COALESCE((SELECT json_agg(m ORDER BY m.created_at) FROM ticket_messages m WHERE m.reference=t.reference),'[]') AS messages,
           (SELECT count(*)::int FROM ticket_email e WHERE e.reference=t.reference AND sent_at IS NULL) AS queued
-        FROM tickets t JOIN demo_sessions s ON s.id=t.session_id ORDER BY t.created_at DESC LIMIT 100`);
+        FROM tickets t JOIN demo_sessions s ON s.id=t.session_id WHERE t.deleted_at IS NULL ORDER BY t.created_at DESC LIMIT 100`);
       return json(res, 200, { tickets: result.rows });
+    }
+    if (action === 'delete-ticket' && req.method === 'POST') {
+      const { reference } = await readBody(req);
+      if (typeof reference !== 'string' || !/^HD-[A-F0-9]{8}$/.test(reference)) throw new ServiceError('invalid_ticket', 400);
+      const deleted = await db().query('UPDATE tickets SET deleted_at=now() WHERE reference=$1 AND deleted_at IS NULL RETURNING reference', [reference]);
+      if (!deleted.rowCount) throw new ServiceError('ticket_unavailable', 404);
+      return json(res, 200, { ok: true });
     }
     if (action === 'review-ticket' && req.method === 'POST') {
       const { reference, status } = await readBody(req);
@@ -137,7 +144,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, services: typeo
         throw new ServiceError('invalid_review', 400);
       }
       const result = await db().query(`UPDATE tickets SET status=$2,reviewed_at=now()
-        WHERE reference=$1 AND status='pending'
+        WHERE reference=$1 AND status='pending' AND deleted_at IS NULL
         RETURNING reference,reason,profile,status,created_at,reviewed_at,request_text`, [reference, status]);
       if (!result.rowCount) throw new ServiceError('ticket_already_reviewed_or_unavailable', 409);
       return json(res, 200, { ticket: result.rows[0] });
@@ -147,20 +154,23 @@ async function handle(req: IncomingMessage, res: ServerResponse, services: typeo
       if (typeof reference !== 'string' || typeof id !== 'string' || !uuid.test(id) || typeof message !== 'string' || !message.trim() || message.length > 2000) throw new ServiceError('invalid_reply', 400);
       const emailId = `reply-${id}`;
       const result = await db().query(`WITH added AS (
-        INSERT INTO ticket_messages(id,reference,body) SELECT $1,reference,$3 FROM tickets WHERE reference=$2
+        INSERT INTO ticket_messages(id,reference,body)
+        SELECT $1,reference,$3 FROM tickets WHERE reference=$2 AND deleted_at IS NULL FOR UPDATE
         ON CONFLICT(id) DO NOTHING RETURNING *
       ), mail AS (
         INSERT INTO ticket_email(id,reference,recipient,subject,body)
         SELECT $4,a.reference,s.email,'Loopp support reply ' || a.reference,a.body
         FROM added a JOIN tickets t ON t.reference=a.reference JOIN demo_sessions s ON s.id=t.session_id
         WHERE s.auth_kind='google' AND s.email IS NOT NULL ON CONFLICT DO NOTHING
-      ) SELECT * FROM added UNION ALL SELECT * FROM ticket_messages WHERE id=$1 AND reference=$2 AND body=$3`, [id, reference, message.trim(), emailId]);
+      ) SELECT * FROM added UNION ALL SELECT m.* FROM ticket_messages m JOIN tickets t ON t.reference=m.reference
+        WHERE m.id=$1 AND m.reference=$2 AND m.body=$3 AND t.deleted_at IS NULL`, [id, reference, message.trim(), emailId]);
       if (!result.rowCount) throw new ServiceError('ticket_unavailable', 404);
       return json(res, 200, { message: result.rows[0], delivery: await deliverEmail(emailId) });
     }
     if (action === 'retry-email' && req.method === 'POST') {
       const { reference } = await readBody(req);
-      const rows = await db().query('SELECT id FROM ticket_email WHERE reference=$1 AND sent_at IS NULL ORDER BY created_at LIMIT 5', [reference]);
+      const rows = await db().query(`SELECT e.id FROM ticket_email e JOIN tickets t ON t.reference=e.reference
+        WHERE e.reference=$1 AND e.sent_at IS NULL AND t.deleted_at IS NULL ORDER BY e.created_at LIMIT 5`, [reference]);
       await Promise.all(rows.rows.map(row => deliverEmail(row.id)));
       return json(res, 200, { ok: true });
     }

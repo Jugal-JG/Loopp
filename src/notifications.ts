@@ -10,6 +10,7 @@ export async function deliverEmail(id: string) {
     }
     const result = await db().query(`UPDATE ticket_email SET send_until=now()+interval '30 seconds'
       WHERE id=$1 AND sent_at IS NULL AND (send_until IS NULL OR send_until<now())
+      AND EXISTS (SELECT 1 FROM tickets WHERE tickets.reference=ticket_email.reference AND deleted_at IS NULL)
       RETURNING recipient,subject,body`, [id]);
     const mail = result.rows[0];
     if (!mail) return 'unchanged';

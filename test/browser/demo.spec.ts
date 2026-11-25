@@ -7,25 +7,36 @@ function sse(events: Array<[string, object]>) {
 test('reports a plain-text login function failure with its request reference', async ({ page }) => {
   await page.route('**/api/support?*', route => {
     const action = new URL(route.request().url()).searchParams.get('action');
-    if (action === 'auth-options') return route.fulfill({ json: {} });
+    if (action === 'auth-options') return route.fulfill({ json: { google: true } });
     if (action === 'session') return route.fulfill({ status: 401, json: {} });
     return route.fulfill({ status: 500, contentType: 'text/plain',
       headers: { 'x-vercel-id': 'test-runtime-id' }, body: 'A server error has occurred' });
   });
   await page.goto('/');
+  await expect(page.getByRole('link', { name: 'Continue with Google' })).toHaveAttribute('href', '/api/support?action=google');
   await page.getByLabel('Passcode').fill('test-passcode');
+  await page.getByRole('button', { name: 'Show password' }).click();
+  await expect(page.getByLabel('Passcode')).toHaveAttribute('type', 'text');
+  await page.getByRole('button', { name: 'Hide password' }).click();
+  await expect(page.getByLabel('Passcode')).toHaveAttribute('type', 'password');
   await page.getByRole('button', { name: 'Open demo' }).click();
   await expect(page.getByRole('alert')).toHaveText('The support service returned HTTP 500. Reference: test-runtime-id.');
 });
 
 test('reviews a pending human escalation and shows its saved status', async ({ page }) => {
+  let deleted = false;
   const ticket = { reference: 'HD-1234ABCD', reason: 'refund_ineligible', profile: 'basic', status: 'pending',
     created_at: '2026-11-24T12:00:00Z', request_text: 'Please refund my last charge.', messages: [] as { id: string; body: string }[] };
   await page.route('**/api/support?*', route => {
     const action = new URL(route.request().url()).searchParams.get('action');
     if (action === 'session') return route.fulfill({ json: { turns: [], identity: { admin: true } } });
     if (action === 'auth-options') return route.fulfill({ json: {} });
-    if (action === 'tickets') return route.fulfill({ json: { tickets: [ticket] } });
+    if (action === 'tickets') return route.fulfill({ json: { tickets: deleted ? [] : [ticket] } });
+    if (action === 'delete-ticket') {
+      expect(route.request().postDataJSON()).toEqual({ reference: ticket.reference });
+      deleted = true;
+      return route.fulfill({ json: { ok: true } });
+    }
     if (action === 'reply-ticket') {
       const { reference, message, id } = route.request().postDataJSON();
       expect(reference).toBe(ticket.reference);
@@ -47,6 +58,9 @@ test('reviews a pending human escalation and shows its saved status', async ({ p
   await expect(page.getByText('rejected', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Refresh' }).click();
   await expect(page.getByText('rejected', { exact: true })).toBeVisible();
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: 'Delete ticket HD-1234ABCD' }).click();
+  await expect(page.getByText('No escalations yet.')).toBeVisible();
 });
 
 test('reviewer login, tool status, drawer, simulated failure and retry', async ({ page }) => {
