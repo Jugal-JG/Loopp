@@ -12,6 +12,9 @@ export type VoiceCallbacks = {
 
 const silenceMs = 450;
 const interimFallbackMs = 650;
+const transcriptStallMs = 10_000;
+const speechOnsetLevel = 0.025;
+const speechContinuationLevel = 0.015;
 
 function encode(bytes: Uint8Array) {
   return btoa(String.fromCharCode(...bytes));
@@ -138,7 +141,10 @@ export async function startVoice(callbacks: VoiceCallbacks, signal: AbortSignal)
           }
         },
         onerror: () => fail('Live transcription disconnected. Turn voice back on to retry.'),
-        onclose: () => fail('Voice session ended. Turn voice back on to reconnect.'),
+        onclose: event => {
+          if (!closed) console.warn('Gemini Live socket closed', { code: event.code });
+          fail('Voice session ended. Turn voice back on to reconnect.');
+        },
       },
     });
     timer = setTimeout(() => fail('Live transcription did not start. Try voice again.'), 10_000);
@@ -198,16 +204,30 @@ export async function startVoice(callbacks: VoiceCallbacks, signal: AbortSignal)
         submitTranscript(interim, utterance.speechEnd, utterance.epoch);
         callbacks.phase('Listening');
       }, interimFallbackMs);
-      transcriptTimeout = setTimeout(() => fail('Live transcription stalled. Reconnect voice or use chat.'), 5000);
+      function checkForStall() {
+        if (closed || pending !== utterance) return;
+        // Let new speech finish while its audio waits for the previous final.
+        const idleFor = performance.now() - Math.max(utterance.speechEnd + silenceMs, lastLoud);
+        if (idleFor < transcriptStallMs) {
+          transcriptTimeout = setTimeout(checkForStall, transcriptStallMs - idleFor);
+          return;
+        }
+        fail('Live transcription stalled. Reconnect voice or use chat.');
+      }
+      transcriptTimeout = setTimeout(checkForStall, transcriptStallMs);
     }
     worklet.port.onmessage = event => {
       if (closed || muted || !session) return;
       const pcm = event.data as Int16Array;
       level = Math.sqrt(pcm.reduce((sum, sample) => sum + (sample / 32768) ** 2, 0) / pcm.length);
-      loudFrames = level > 0.033 ? loudFrames + 1 : 0;
+      const continuing = lastLoud && performance.now() - lastLoud < silenceMs;
+      loudFrames = level > (continuing ? speechContinuationLevel : speechOnsetLevel) ? loudFrames + 1 : 0;
       if (loudFrames >= 2) {
         lastLoud = performance.now();
-        if (loudFrames === 2) interrupt();
+        if (loudFrames === 2) {
+          interrupt();
+          if (pending) callbacks.phase('Listening');
+        }
         clearTimeout(silenceTimer);
         if (!pending) silenceTimer = setTimeout(finishSpeech, silenceMs);
       }

@@ -188,7 +188,6 @@ test(recoverInterim ? 'Send voice automatically submits a stalled transcript onc
   if (recoverInterim) {
     await page.getByRole('button', { name: 'Send voice' }).click();
     await expect(page.getByText('Download the receipt in Billing.')).toBeVisible();
-    sendTranscript!({ serverContent: { inputTranscription: { text: preview } } });
   } else {
     sendTranscript!({ serverContent: { inputTranscription: { text: 'Find my receipt' } } });
   }
@@ -201,6 +200,14 @@ test(recoverInterim ? 'Send voice automatically submits a stalled transcript onc
   await page.getByRole('button', { name: 'Unmute mic' }).click();
   await expect(page.getByText('Listening', { exact: true })).toBeVisible({ timeout: 1200 });
   await expect(page.locator('body')).toHaveAttribute('data-speech-cancelled', 'true');
+  if (recoverInterim) {
+    // Keep speaking beyond the stall deadline before the previous final arrives.
+    await page.waitForTimeout(10_200);
+    await expect(page.getByRole('button', { name: 'Stop voice' })).toBeVisible();
+    const framesBeforeFinal = microphoneFrames;
+    sendTranscript!({ serverContent: { inputTranscription: { text: preview } } });
+    await expect.poll(() => microphoneFrames).toBeGreaterThan(framesBeforeFinal);
+  }
   sendTranscript!({ serverContent: { inputTranscription: { text: 'Compare Basic and Pro' } } });
   await expect(page.getByText('Here is the plan comparison.')).toBeVisible();
   await page.getByRole('button', { name: 'Stop voice' }).click();
