@@ -1,6 +1,6 @@
 import { chunks, type Match } from './policies.js';
 
-export const PROMPT_VERSION = 'support-v3';
+export const PROMPT_VERSION = 'support-v4';
 export const MAX_STEPS = 6;
 export const PRO_REFUND_POLICY = 'pro-billing/refund-eligibility';
 const capabilities: Reply = {
@@ -121,7 +121,13 @@ export async function runSupportTurn(input: AgentInput, tools: AgentTools, emit:
           const rewritten = query.toLowerCase() === original.toLowerCase() ? [] : await tools.search(query, tier);
           const supplemental = await Promise.all(subqueries.map(item =>
             tools.search(item.query.trim().slice(0, 300), item.publicTier ?? tier, !!item.publicTier)));
-          if (!direct.some(match => match.score >= input.threshold)) return direct;
+          if (!comparesPlans && !direct.some(match => match.score >= input.threshold)) return direct;
+          if (comparesPlans) {
+            const available = [...direct, ...supplemental.flat()];
+            const missingTiers = (['Basic', 'Pro'] as const).filter(plan =>
+              !available.some(match => match.tier === plan && match.score >= input.threshold));
+            supplemental.push(...await Promise.all(missingTiers.map(plan => tools.search(original, plan, true))));
+          }
           const merged = new Map<string, Match>();
           for (const match of [...direct, ...rewritten.filter(match => direct.some(item => item.id === match.id)), ...supplemental.flat()]) {
             if ((merged.get(match.id)?.score ?? -Infinity) < match.score) merged.set(match.id, match);

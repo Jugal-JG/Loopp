@@ -65,6 +65,21 @@ test('combines independently retrieved passages and verifies them together', asy
   assert.match(reply.text, /two-business-day[\s\S]*four-business-hour/);
 });
 
+test('retrieves published evidence for the other plan when the planner omits its search', async () => {
+  const basic = { ...chunks.find(chunk => chunk.id === 'basic-admin/standard-support')!, score: 0.80 };
+  const pro = { ...chunks.find(chunk => chunk.id === 'pro-admin/priority-support')!, score: 0.79 };
+  const searches: Array<[string, boolean]> = [];
+  const flow = fixture([search, { action: 'answer', sourceIds: [basic.id, pro.id] }], {
+    search: async (_query, tier, publicOnly = false) => {
+      searches.push([tier, publicOnly]);
+      return tier === 'Basic' ? [basic] : [pro];
+    },
+  });
+  const reply = await flow.run({ message: 'What is the difference between Pro and Basic accounts?' });
+  assert.deepEqual(searches, [['Pro', false], ['Basic', true]]);
+  assert.deepEqual(reply.sources, [basic.id, pro.id]);
+});
+
 function fixture(decisions: Decision[], overrides: Partial<AgentTools> = {}) {
   const calls: string[] = [];
   const contexts: any[] = [];
