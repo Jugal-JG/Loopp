@@ -17,6 +17,15 @@ Loopp is a customer support agent for a fictional SaaS workspace. It handles bil
 
 ## Current architecture
 
+| Layer | Choice | Why it fits Loopp |
+| --- | --- | --- |
+| Frontend and API | React + Vite, Node.js + TypeScript | Chat and voice share one support API. Server-Sent Events deliver tool progress, text, and audio. |
+| Reply planning and evidence verification | Mistral Voxtral Small (`voxtral-small-2507`) | Structured outputs let the agent select allowed actions and cite retrieved passages. Policy replies use verified passage text. |
+| Policy embeddings | Gemini Embedding 2 (`gemini-embedding-2`, 768 dimensions) | Maps questions and policy passages into the same vector space for semantic search. |
+| Retrieval and persistence | Neon Postgres + pgvector | Cosine search filters policy passages by account tier. The same database stores sessions, turns, refunds, and tickets. |
+| Live speech-to-text | Gemini 3.5 Transcribe Live (`gemini-3.5-transcribe-live`) | WebSocket transcription supports interim English captions while the user speaks. |
+| Speech output | Kyutai Pocket TTS (`english_2026-10`, Eve preset) | A separately hosted CPU service streams audio back to Loopp for interruptible playback. |
+
 ```mermaid
 flowchart LR
     Mic[Browser microphone] --> Worklet[AudioWorklet 16 kHz PCM]
