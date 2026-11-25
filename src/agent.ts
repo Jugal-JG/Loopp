@@ -45,6 +45,10 @@ export function evidence(matches: Match[], threshold: number, sourceId?: string,
 
 export async function runSupportTurn(input: AgentInput, tools: AgentTools, emit: Trace): Promise<Reply> {
   const question = input.message.trim();
+  if (/^(?:(?:hi|hello|hey)[,!?. ]+)?(?:how can you help(?: me)?|what can you (?:do|help(?: me)? with)|what do you do)[?.! ]*$/i.test(question)) {
+    emit('trace', { stage: 'app help', topic: 'capabilities' });
+    return capabilities;
+  }
   if (/^(?:why (?:are you (?:not|aren.t you)|aren.t you|didn.t you|did you not) (?:speak|speaking|read|say)|(?:why (?:is there|was there) )?no (?:voice|audio|sound)|(?:i )?can.t hear you|why (?:isn.t|is not) (?:the |your )?(?:voice|audio|sound) working)/i.test(question)) {
     emit('trace', { stage: 'app help', topic: 'voice playback' });
     return { kind: 'answer', text: 'Typed messages get a text reply. Voice turns normally play audio. If a voice reply is silent, check your browser volume and output device. An audio error will appear above the composer if synthesis fails.' };

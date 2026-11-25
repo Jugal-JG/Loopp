@@ -12,6 +12,7 @@ import { db, searchByVector } from '../src/store';
 import { chunks } from '../src/policies';
 import { PRO_REFUND_POLICY, type Reply } from '../src/agent';
 import { readEvents } from '../src/stream';
+import { ServiceError } from '../src/provider';
 
 const axis = (dimension: number) => Array.from({ length: 768 }, (_, index) => Number(index === dimension));
 const refundVector = axis(chunks.findIndex(chunk => chunk.id === PRO_REFUND_POLICY));
@@ -28,6 +29,7 @@ test('local HTTP, SSE, pgvector ranking, session reload, recovery, tickets and e
   process.env.ADMIN_PASSWORD = 'test-admin-passcode';
   const api = createServer(createHandler({
     decide: async context => {
+      if (context.message === 'Simulate planner capacity') throw new ServiceError('upstream_busy', 503, 'gemini-3.1-flash-lite');
       const state = context as { message: string; allowed: string[]; matches?: typeof chunks };
       if (state.allowed[0] === 'verifyAccount') return { action: 'verifyAccount' };
       if (!state.matches) return { action: 'searchPolicy' };
@@ -91,6 +93,7 @@ test('local HTTP, SSE, pgvector ranking, session reload, recovery, tickets and e
       assert.match(response.headers.get('content-type') ?? '', /^text\/event-stream/);
       await readEvents(response, (event, data) => {
         events.push(event);
+        if (event === 'trace' && data.stage === 'voice failure') events.push(data.provider + ' failed');
         if (event === 'reply') reply = data.reply;
       });
       assert.ok(events.includes('done'));
@@ -102,11 +105,14 @@ test('local HTTP, SSE, pgvector ranking, session reload, recovery, tickets and e
     const confirmed = await turn('confirm refund', 'voice', id);
     assert.equal(confirmed.reply.kind, 'refunded');
     assert.ok(confirmed.events.includes('browserAudio'));
+    assert.ok(confirmed.events.indexOf('browserAudio') < confirmed.events.indexOf('reply'));
     assert.ok(!confirmed.events.includes('audio'));
-    process.env.TTS_OUTPUT = 'gemini';
+    process.env.TTS_OUTPUT = 'auto';
+    delete process.env.GROQ_API_KEY;
     const replay = await turn('confirm refund', 'voice', id);
     assert.deepEqual(replay.reply, confirmed.reply);
-    assert.ok(replay.events.includes('audio'));
+    assert.ok(replay.events.includes('groq failed'));
+    assert.ok(replay.events.indexOf('audio') > replay.events.indexOf('groq failed'));
     assert.equal((await db().query('SELECT count(*)::int AS count FROM refunds')).rows[0].count, 1);
     const retry = randomUUID();
     assert.equal((await turn('Where is my receipt?', 'chat', retry, 'timeout')).reply.kind, 'error');
@@ -142,7 +148,7 @@ test('local HTTP, SSE, pgvector ranking, session reload, recovery, tickets and e
     assert.deepEqual(afterDelete.tickets, []);
     assert.equal((await fetchPost('reply-ticket', { ...answer, id: randomUUID() }, adminCookie)).status, 404);
     assert.match((await turn('Where is my receipt?', 'chat', randomUUID(), 'rate')).reply.text, /rate limited/);
-    assert.match((await turn('Where is my receipt?', 'chat', randomUUID(), 'tool')).reply.text, /simulated tool failed/);
+    assert.match((await turn('Simulate planner capacity')).reply.text, /gemini-3\.1-flash-lite.*HTTP 503/);
     const rejected = await fetchPost('turn', { id: randomUUID(), message: 'Where is my receipt?', mode: 'chat', profile: 'pro' }, cookie);
     assert.equal(rejected.status, 429);
     await db().query('UPDATE demo_sessions SET pending=$1', [{ id: randomUUID(), profile: 'pro', policy: PRO_REFUND_POLICY }]);

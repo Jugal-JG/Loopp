@@ -2,10 +2,11 @@ import { ServiceError } from './provider.js';
 
 export const orpheusModel = 'canopylabs/orpheus-v1-english';
 
-export async function orpheusSpeech(text: string, onAudio: (data: string, mime: string) => boolean) {
+export async function orpheusSpeech(text: string, onAudio: (data: string, mime: string) => boolean, signal?: AbortSignal) {
   const key = process.env.GROQ_API_KEY?.trim();
   if (!key) throw new ServiceError('groq_not_configured', 503);
-  const deadline = AbortSignal.timeout(12000);
+  const timeout = AbortSignal.timeout(12000);
+  const deadline = signal ? AbortSignal.any([signal, timeout]) : timeout;
   let remaining = Array.from(text.trim());
   while (remaining.length) {
     const head = remaining.slice(0, 200).join('');

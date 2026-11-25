@@ -30,16 +30,17 @@ test('voice playback questions are answered as app help without an escalation', 
 test('Gemini handles greetings and capabilities and declines off-topic requests without escalation', async () => {
   const flow = fixture([
     { action: 'greet', greeting: 'Hello! Good to hear from you.' },
-    { action: 'explainCapabilities' },
     { action: 'declineOffTopic' },
   ]);
   const greeting = await flow.run({ message: 'Good morning!' });
   assert.deepEqual(greeting, { kind: 'answer', text: 'Hello! Good to hear from you.' });
   const capabilities = await flow.run({ message: 'What can you do?' });
   assert.match(capabilities.text, /billing and receipts/);
+  const spokenCapabilities = await flow.run({ message: 'Hi. How can you help me?' });
+  assert.deepEqual(spokenCapabilities, capabilities);
   const offTopic = await flow.run({ message: 'Hi! What is 2 + 2?' });
   assert.deepEqual(offTopic, { kind: 'answer', text: 'I can only answer Loopp help desk questions.' });
-  assert.equal(flow.contexts.length, 3);
+  assert.equal(flow.contexts.length, 2);
   assert.deepEqual(flow.events.filter(event => !event.startsWith('verifyAccount:')), []);
   assert.deepEqual(flow.calls, []);
 });

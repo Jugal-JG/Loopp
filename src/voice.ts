@@ -23,6 +23,7 @@ function encode(bytes: Uint8Array) {
 }
 
 export async function startVoice(callbacks: VoiceCallbacks, signal: AbortSignal) {
+  window.speechSynthesis?.getVoices(); // Start loading installed voices during mic setup.
   const media = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
   const context = new AudioContext();
   let session: Awaited<ReturnType<GoogleGenAI['live']['connect']>> | undefined;
@@ -289,6 +290,7 @@ export async function startVoice(callbacks: VoiceCallbacks, signal: AbortSignal)
         const englishVoices = window.speechSynthesis.getVoices().filter(voice => /^en\b/i.test(voice.lang));
         const female = /\b(zira|jenny|aria|samantha|karen|moira|tessa|veena|victoria|female)\b/i;
         const preferred = englishVoices.find(voice => voice.localService && female.test(voice.name))
+          ?? englishVoices.find(voice => voice.localService)
           ?? englishVoices.find(voice => female.test(voice.name));
         if (preferred) utterance.voice = preferred;
         fallback = utterance;

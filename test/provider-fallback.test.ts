@@ -39,3 +39,21 @@ test('a partial cloud reply does not restart in another voice', async () => {
     { name: 'groq', speak: async () => assert.fail('Groq should not replay the reply') },
   ], () => true, () => assert.fail('Browser should not replay the reply'), () => {}, () => false), failure);
 });
+
+test('a provider that stalls before audio is canceled and cannot play a late chunk', async () => {
+  let lateAudio: (() => boolean) | undefined;
+  const audio: string[] = [];
+  await playSpeechWithFallback([
+    { name: 'gemini', firstAudioMs: 10, speak: (write, signal) => new Promise<void>(resolve => {
+      lateAudio = () => write('late audio', 'audio/l16');
+      signal.addEventListener('abort', () => resolve(), { once: true });
+    }) },
+    { name: 'groq', speak: async write => { write('groq audio', 'audio/wav'); } },
+  ], data => { audio.push(data); return true; }, () => assert.fail('Groq succeeded'),
+  (provider, error) => {
+    assert.equal(provider, 'gemini');
+    assert.equal((error as Error).name, 'TimeoutError');
+  }, () => false);
+  assert.equal(lateAudio?.(), false);
+  assert.deepEqual(audio, ['groq audio']);
+});

@@ -14,7 +14,7 @@ type Usage = { promptTokenCount?: number; candidatesTokenCount?: number; totalTo
 type UsageReporter = (usage?: Usage, model?: string) => void;
 
 export class ServiceError extends Error {
-  constructor(public code: string, public status: number) { super(code); }
+  constructor(public code: string, public status: number, public model?: string) { super(code); }
 }
 
 export function isRateLimit(error: unknown) {
@@ -29,7 +29,9 @@ export async function withTextFallback<T>(generate: (model: string) => Promise<T
   try {
     return { model: primary, result: await generate(primary) };
   } catch (error) {
-    if (!isRateLimit(error) || primary === fallback) throw error;
+    const status = (error as { status?: number } | null)?.status;
+    if (primary === fallback || (!isRateLimit(error) && status !== 503)) throw error;
+    console.info(JSON.stringify({ stage: 'text fallback', primary, fallback, status }));
     return { model: fallback, result: await generate(fallback) };
   }
 }
@@ -44,7 +46,7 @@ function ai() {
   });
 }
 
-async function callGemini<T>(operation: string, run: () => Promise<T>): Promise<T> {
+async function callGemini<T>(operation: string, run: () => Promise<T>, model?: string): Promise<T> {
   try {
     return await run();
   } catch (error) {
@@ -55,6 +57,7 @@ async function callGemini<T>(operation: string, run: () => Promise<T>): Promise<
       (status === 400 && /API_KEY_INVALID|API_KEY_EXPIRED|API key not valid/i.test(failure?.message ?? ''));
     console.warn(JSON.stringify({ provider: 'gemini', operation, status: Number.isInteger(status) ? status : undefined, keyRejected }));
     if (keyRejected) throw new ServiceError('gemini_access_denied', 503);
+    if (status === 503) throw new ServiceError('upstream_busy', 503, model);
     if (status === 404) throw new ServiceError('gemini_resource_unavailable', 503);
     if (operation === 'voice token' && status === 400) throw new ServiceError('voice_token_rejected', 503);
     throw error;
@@ -66,7 +69,7 @@ export async function embedding(text: string, title?: string) {
     model: embeddingModel,
     contents: title ? `title: ${title} | text: ${text}` : `task: question answering | query: ${text}`,
     config: { outputDimensionality: dimensions },
-  }));
+  }), embeddingModel);
   const values = result.embeddings?.[0]?.values;
   if (!values || values.length !== dimensions || !values.every(Number.isFinite) || !values.some(Boolean)) {
     throw new ServiceError('invalid_embedding', 502);
@@ -75,10 +78,9 @@ export async function embedding(text: string, title?: string) {
 }
 
 function generateText(request: Omit<GenerateContentParameters, 'model'>) {
-  return callGemini('text generation', () => {
-    const client = ai();
-    return withTextFallback(model => client.models.generateContent({ ...request, model }));
-  });
+  const client = ai();
+  return withTextFallback(model => callGemini('text generation', () =>
+    client.models.generateContent({ ...request, model }), model));
 }
 
 export async function decide(context: PlannerContext, onUsage: UsageReporter): Promise<Decision> {
@@ -129,19 +131,19 @@ export async function verifyEvidence(input: AgentInput, account: Account, select
   try { return JSON.parse(result.text ?? '').supported === true; } catch { return false; }
 }
 
-export async function speech(text: string, onAudio: (data: string, mime: string) => boolean, onUsage: (usage: unknown) => void) {
+export async function speech(text: string, onAudio: (data: string, mime: string) => boolean, onUsage: (usage: unknown) => void, signal?: AbortSignal) {
   const open = () => ai().interactions.create({
     model: ttsModel(),
     input: [{ type: 'user_input', content: [{ type: 'text', text }] }],
     response_format: { type: 'audio', mime_type: 'audio/l16', sample_rate: 24000 },
     generation_config: { speech_config: [{ voice: 'Kore' }] },
     stream: true,
-  });
+  }, { signal });
   let stream;
   try { stream = await open(); }
   catch (error) {
     if ((error as { status?: number }).status !== 503) throw error;
-    await delay(350);
+    await delay(350, undefined, { signal });
     stream = await open();
   }
   let sent = false;

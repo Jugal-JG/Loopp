@@ -131,6 +131,7 @@ function App() {
       function recordPlayback(stage: string) {
         if (!firstAudio) return;
         firstAudio = false;
+        console.info('Loopp voice', { requestId: response.headers.get('X-Request-Id'), stage, elapsedMs: elapsed() });
         update(id, turn => ({ ...turn, traces: [...turn.traces, { event: 'timing', stage, elapsedMs: elapsed(),
           speechEndToAudioMs: speechEnd === undefined ? null : Math.round(performance.now() - speechEnd) }] }));
       }
@@ -156,12 +157,19 @@ function App() {
           releaseTurn();
         }
         if (event === 'failure') throw new Error(data.message);
-        if (event === 'browserAudio') playBrowserVoice();
+        if (event === 'browserAudio') {
+          if (typeof data.text === 'string') approvedText = data.text;
+          playBrowserVoice();
+        }
         if (event === 'voiceError' && epoch === voiceSession?.currentEpoch()) {
           const usedFallback = !receivedAudio && playBrowserVoice();
           setStatus(usedFallback ? `${data.message} Trying your browser voice.` : data.message);
         }
         if (event === 'audio' && voiceSession && epoch !== undefined) {
+          if (!receivedAudio) console.info('Loopp voice', {
+            requestId: response.headers.get('X-Request-Id'), stage: 'first audio received',
+            interrupted: epoch !== voiceSession.currentEpoch(), elapsedMs: elapsed(),
+          });
           receivedAudio = true;
           audioQueue = audioQueue.then(() => voiceSession.play(data.data, data.mime, epoch)).then(played => {
             if (played) recordPlayback('playback scheduled');

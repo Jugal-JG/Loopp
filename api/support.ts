@@ -16,7 +16,6 @@ const errors: Record<string, string> = {
   turn_busy: 'Another turn is still running. Wait for it to finish.',
   database_not_configured: 'Connect Neon and seed the policy database to start.',
   wrong_origin: 'Open the Loopp app at the URL printed by Vite and try again.',
-  upstream_busy: 'Gemini is temporarily at capacity. Retry this turn in a moment.',
   groq_speech_failed: 'Orpheus could not generate the audio reply.',
   gemini_not_configured: 'Set GEMINI_API_KEY on the server to start.',
   gemini_access_denied: 'Gemini denied access. Check the server API key and its permissions.',
@@ -24,6 +23,14 @@ const errors: Record<string, string> = {
   voice_token_rejected: 'Gemini rejected the request to start a voice session.',
   unavailable: 'Support is temporarily unavailable. Try again.',
 };
+
+function failureMessage(failure: ServiceError) {
+  if (failure.code === 'upstream_busy') {
+    const label = failure.model ? `Gemini (${failure.model})` : 'Gemini';
+    return `${label} returned HTTP ${failure.status} Service Unavailable. The service is temporarily at capacity. Retry in a moment.`;
+  }
+  return errors[failure.code];
+}
 
 function classify(error: unknown) {
   if (error instanceof ServiceError) return error;
@@ -81,9 +88,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, services: typeo
   const url = new URL(req.url ?? '/', 'http://loopp.local');
   const action = url.searchParams.get('action') ?? 'session';
   const secure = !localOrigin;
+  const requestStarted = performance.now();
+  if (action === 'turn') console.info(JSON.stringify({ requestId, stage: 'turn received' }));
   res.setHeader('X-Request-Id', requestId);
   try {
-    if (action === 'health' && req.method === 'GET') return json(res, 200, { status: 'ok' });
+    if (action === 'health' && req.method === 'GET') return json(res, 200, { status: 'ok', modelAwareErrors: true });
     if (action === 'auth-options' && req.method === 'GET') return json(res, 200, { google: googleEnabled(), admin: Boolean(adminEmail() && process.env.ADMIN_PASSWORD) });
     if (action === 'google' && req.method === 'GET') {
       const flow = googleStart();
@@ -235,6 +244,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, services: typeo
         if (!res.destroyed) res.write(`event: ${event}\ndata: ${JSON.stringify(item)}\n\n`);
       };
       const keepalive = setInterval(() => { if (!res.destroyed) res.write(': keepalive\n\n'); }, 8000);
+      console.info(JSON.stringify({ requestId, stage: 'agent started', elapsedMs: Math.round(performance.now() - requestStarted) }));
       let reply: Reply;
       let notification: Promise<string> | undefined;
       try {
@@ -285,46 +295,93 @@ async function handle(req: IncomingMessage, res: ServerResponse, services: typeo
         if (existing.reply && existing.reply.kind !== 'error') emit('trace', { stage: 'replay' });
       } catch (error) {
         const failure = classify(error);
-        console.warn(JSON.stringify({ requestId, code: failure.code }));
-        emit('trace', { stage: 'failure', code: failure.code });
-        reply = { kind: 'error', text: errors[failure.code] ?? errors.unavailable };
+        console.warn(JSON.stringify({ requestId, code: failure.code, model: failure.model, status: failure.status }));
+        emit('trace', { stage: 'failure', code: failure.code, model: failure.model, status: failure.status });
+        reply = { kind: 'error', text: failureMessage(failure) ?? errors.unavailable };
       } finally {
         clearInterval(keepalive);
       }
-      await db().query('UPDATE support_turns SET reply=$3,traces=$4 WHERE session_id=$1 AND id=$2', [session.id, id, reply, JSON.stringify(traces)]);
-      const state = (await db().query('SELECT pending FROM demo_sessions WHERE id=$1', [session.id])).rows[0];
-      await release();
-      // Only split where sentence punctuation is followed by a space; preserve decimal amounts.
-      const sentences = reply.text.split(/(?<=[.!?])\s+/);
-      for (const [index, sentence] of sentences.entries()) emit('text', { text: `${index ? ' ' : ''}${sentence}` });
-      emit('reply', { reply });
-      emit('done', { pending: state.pending?.profile });
-      if (mode === 'voice' && !res.destroyed && reply.kind !== 'error') {
+      function logTiming(stage: string, extra: Record<string, unknown> = {}) {
+        console.info(JSON.stringify({ requestId, mode, stage, elapsedMs: Math.round(performance.now() - requestStarted), ...extra }));
+      }
+      let voiceCanceled = false;
+      function emitVoice(event: string, data: Record<string, unknown>) {
+        if (voiceCanceled || res.destroyed) return;
+        emit(event, data);
+      }
+      async function streamVoice() {
+        let audioReady = false;
+        let activeProvider = '';
+        let attemptStarted = performance.now();
         const voiceOutput = process.env.TTS_OUTPUT || 'auto';
         try {
-          const gemini = { name: 'gemini', speak: (onAudio: (data: string, mime: string) => boolean) =>
-            services.speech(reply.text, onAudio, usage => emit('usage', { service: 'tts', usage: usage ?? null, estimatedCostUsd: 0 })) };
-          const groq = { name: 'groq', speak: (onAudio: (data: string, mime: string) => boolean) => orpheusSpeech(reply.text, onAudio) };
+          const gemini = { name: 'gemini', firstAudioMs: voiceOutput === 'auto' ? 1800 : 4000, speak: (onAudio: (data: string, mime: string) => boolean, signal: AbortSignal) => {
+            activeProvider = 'gemini';
+            attemptStarted = performance.now();
+            logTiming('speech requested', { provider: activeProvider });
+            emitVoice('trace', { stage: 'voice attempt', provider: activeProvider });
+            return services.speech(reply.text, onAudio,
+              usage => emitVoice('usage', { service: 'tts', usage: usage ?? null, estimatedCostUsd: 0 }), signal);
+          } };
+          const groq = { name: 'groq', firstAudioMs: voiceOutput === 'auto' ? 2500 : 3500, speak: (onAudio: (data: string, mime: string) => boolean, signal: AbortSignal) => {
+            activeProvider = 'groq';
+            attemptStarted = performance.now();
+            logTiming('speech requested', { provider: activeProvider });
+            emitVoice('trace', { stage: 'voice attempt', provider: activeProvider });
+            return orpheusSpeech(reply.text, onAudio, signal);
+          } };
           const attempts = voiceOutput === 'browser' ? [] : voiceOutput === 'groq' ? [groq]
-            : voiceOutput === 'gemini' ? [gemini] : [gemini, groq];
+            : voiceOutput === 'gemini' ? [gemini] : [groq, gemini];
           await playSpeechWithFallback(attempts, (data, mime) => {
             if (res.destroyed) return false;
-            emit('audio', { data, mime });
+            if (!audioReady) {
+              const providerMs = Math.round(performance.now() - attemptStarted);
+              logTiming('first audio ready', { provider: activeProvider, providerMs });
+              emitVoice('trace', { stage: 'voice first audio', provider: activeProvider, providerMs });
+              audioReady = true;
+            }
+            emitVoice('audio', { data, mime });
             return true;
           }, () => {
-            emit('trace', { stage: 'voice playback', provider: 'browser' });
-            emit('browserAudio', {});
-          }, (provider, error) => emit('trace', { stage: 'voice failure', provider, code: classify(error).code }), () => res.destroyed);
+            logTiming('browser speech selected');
+            emitVoice('trace', { stage: 'voice playback', provider: 'browser' });
+            emitVoice('browserAudio', { text: reply.text });
+          }, (provider, error) => {
+            const code = classify(error).code;
+            logTiming('speech failed', { provider, code, providerMs: Math.round(performance.now() - attemptStarted) });
+            const upstreamStatus = (error as { status?: number } | null)?.status;
+            emitVoice('trace', { stage: 'voice failure', provider, code, upstreamStatus,
+              providerMs: Math.round(performance.now() - attemptStarted) });
+          }, () => res.destroyed || voiceCanceled);
         } catch (error) {
           const failure = classify(error);
-          emit('trace', { stage: 'voice failure', code: failure.code });
+          emitVoice('trace', { stage: 'voice failure', code: failure.code });
           const message = failure.code === 'groq_not_configured' ? 'Orpheus is waiting for a Groq API key.'
             : failure.code === 'rate_limited'
             ? 'The voice provider is rate limiting audio replies. Text replies are still available.'
-            : errors[failure.code] ?? 'Speech synthesis did not complete.';
-          emit('voiceError', { code: failure.code, message });
+            : failureMessage(failure) ?? 'Speech synthesis did not complete.';
+          emitVoice('voiceError', { code: failure.code, message });
         }
-        await db().query('UPDATE support_turns SET traces=$3 WHERE session_id=$1 AND id=$2', [session.id, id, JSON.stringify(traces)]);
+      }
+      const shouldSpeak = mode === 'voice' && reply.kind !== 'error' && !res.destroyed;
+      logTiming('reply ready', { kind: reply.kind });
+      const voiceWork = shouldSpeak ? streamVoice() : undefined;
+      try {
+        await db().query('UPDATE support_turns SET reply=$3,traces=$4 WHERE session_id=$1 AND id=$2', [session.id, id, reply, JSON.stringify(traces)]);
+        const state = (await db().query('SELECT pending FROM demo_sessions WHERE id=$1', [session.id])).rows[0];
+        await release();
+        // Only split where sentence punctuation is followed by a space; preserve decimal amounts.
+        const sentences = reply.text.split(/(?<=[.!?])\s+/);
+        for (const [index, sentence] of sentences.entries()) emit('text', { text: `${index ? ' ' : ''}${sentence}` });
+        emit('reply', { reply });
+        emit('done', { pending: state.pending?.profile });
+        logTiming('reply sent');
+        if (voiceWork) {
+          await voiceWork;
+          await db().query('UPDATE support_turns SET traces=$3 WHERE session_id=$1 AND id=$2', [session.id, id, JSON.stringify(traces)]);
+        }
+      } finally {
+        voiceCanceled = true;
       }
       await notification;
       res.end();
@@ -333,10 +390,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, services: typeo
     }
   } catch (error) {
     const failure = classify(error);
-    console.warn(JSON.stringify({ requestId, code: failure.code }));
+    console.warn(JSON.stringify({ requestId, code: failure.code, model: failure.model, status: failure.status }));
     if (res.headersSent) {
-      if (!res.destroyed) res.end(`event: failure\ndata: ${JSON.stringify({ message: errors[failure.code] ?? errors.unavailable })}\n\n`);
-    } else json(res, failure.status, { code: failure.code, message: errors[failure.code] ?? failure.code.replaceAll('_', ' ') });
+      if (!res.destroyed) res.end(`event: failure\ndata: ${JSON.stringify({ message: failureMessage(failure) ?? errors.unavailable })}\n\n`);
+    } else json(res, failure.status, { code: failure.code, message: failureMessage(failure) ?? failure.code.replaceAll('_', ' ') });
   }
 }
 

@@ -115,6 +115,25 @@ test('denied microphone permission keeps text chat available on mobile layout', 
 
 for (const recoverInterim of [false, true]) {
 test(recoverInterim ? 'Send voice automatically submits a stalled transcript once' : 'voice transcripts share the chat endpoint and microphone speech interrupts browser playback', async ({ page }) => {
+  if (!recoverInterim) await page.addInitScript(() => {
+    const fetchRequest = window.fetch.bind(window);
+    window.fetch = async (...args) => {
+      const response = await fetchRequest(...args);
+      if (!response.url.includes('action=turn')) return response;
+      const events = await response.text();
+      const boundary = events.indexOf('\n\n') + 2;
+      const encode = new TextEncoder();
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(encode.encode(events.slice(0, boundary)));
+          Object.assign(window, { publishTestReply: () => {
+            controller.enqueue(encode.encode(events.slice(boundary)));
+            controller.close();
+          } });
+        },
+      }), { headers: response.headers });
+    };
+  });
   await page.addInitScript(() => {
     Object.defineProperty(window, 'speechSynthesis', { value: {
       getVoices: () => [],
@@ -170,6 +189,9 @@ test(recoverInterim ? 'Send voice automatically submits a stalled transcript onc
     });
     sentTurns++;
     const reply = { kind: 'answer', text: sentTurns === 1 ? 'Download the receipt in Billing.' : 'Here is the plan comparison.' };
+    if (!recoverInterim) return route.fulfill({ contentType: 'text/event-stream', body: sse([
+      ['browserAudio', { text: reply.text }], ['text', { text: reply.text }], ['reply', { reply }], ['done', {}],
+    ]) });
     return route.fulfill({ contentType: 'text/event-stream', body: sse([
       ['text', { text: reply.text }], ['reply', { reply }],
       ['done', {}], ['browserAudio', {}],
@@ -196,6 +218,9 @@ test(recoverInterim ? 'Send voice automatically submits a stalled transcript onc
     await expect(page.getByText('Download the receipt in Billing.')).toBeVisible();
   } else {
     sendTranscript!({ serverContent: { inputTranscription: { text: 'Find my receipt' } } });
+    await expect(page.locator('body')).toHaveAttribute('data-spoken', 'Download the receipt in Billing.');
+    await expect(page.getByText('Download the receipt in Billing.')).toHaveCount(0);
+    await page.evaluate(() => (window as unknown as { publishTestReply: () => void }).publishTestReply());
   }
   await expect(page.getByText('Download the receipt in Billing.')).toBeVisible();
   await expect(page.getByText('Speaking', { exact: true })).toBeVisible();
@@ -219,6 +244,10 @@ test(recoverInterim ? 'Send voice automatically submits a stalled transcript onc
     await expect.poll(() => microphoneFrames).toBeGreaterThan(framesBeforeFinal);
   }
   sendTranscript!({ serverContent: { inputTranscription: { text: 'Compare Basic and Pro' } } });
+  if (!recoverInterim) {
+    await expect(page.locator('body')).toHaveAttribute('data-spoken', 'Here is the plan comparison.');
+    await page.evaluate(() => (window as unknown as { publishTestReply: () => void }).publishTestReply());
+  }
   await expect(page.getByText('Here is the plan comparison.')).toBeVisible();
   await page.getByRole('button', { name: 'Stop voice' }).click();
   await expect(page.getByRole('textbox', { name: 'Your message' })).toBeEditable();

@@ -24,7 +24,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host localhost",
-    "dev:api": "tsx scripts/dev.ts",
+    "dev:api": "tsx watch scripts/dev.ts",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
