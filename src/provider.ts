@@ -34,18 +34,39 @@ export async function withTextFallback<T>(generate: (model: string) => Promise<T
   }
 }
 
-const ai = () => new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY || (() => { throw new ServiceError('gemini_not_configured', 503); })(),
-  // Gemini rejects manually supplied generation deadlines below ten seconds.
-  httpOptions: { apiVersion: 'v1beta', timeout: 15000, retryOptions: { attempts: 1 } },
-});
+function ai() {
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  if (!apiKey) throw new ServiceError('gemini_not_configured', 503);
+  return new GoogleGenAI({
+    apiKey,
+    // Gemini rejects manually supplied generation deadlines below ten seconds.
+    httpOptions: { apiVersion: 'v1beta', timeout: 15000, retryOptions: { attempts: 1 } },
+  });
+}
+
+async function callGemini<T>(operation: string, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (error instanceof ServiceError) throw error;
+    const failure = error as { status?: unknown; message?: string } | null;
+    const status = Number(failure?.status);
+    const keyRejected = status === 401 || status === 403 ||
+      (status === 400 && /API_KEY_INVALID|API_KEY_EXPIRED|API key not valid/i.test(failure?.message ?? ''));
+    console.warn(JSON.stringify({ provider: 'gemini', operation, status: Number.isInteger(status) ? status : undefined, keyRejected }));
+    if (keyRejected) throw new ServiceError('gemini_access_denied', 503);
+    if (status === 404) throw new ServiceError('gemini_resource_unavailable', 503);
+    if (operation === 'voice token' && status === 400) throw new ServiceError('voice_token_rejected', 503);
+    throw error;
+  }
+}
 
 export async function embedding(text: string, title?: string) {
-  const result = await ai().models.embedContent({
+  const result = await callGemini('policy embedding', () => ai().models.embedContent({
     model: embeddingModel,
     contents: title ? `title: ${title} | text: ${text}` : `task: question answering | query: ${text}`,
     config: { outputDimensionality: dimensions },
-  });
+  }));
   const values = result.embeddings?.[0]?.values;
   if (!values || values.length !== dimensions || !values.every(Number.isFinite) || !values.some(Boolean)) {
     throw new ServiceError('invalid_embedding', 502);
@@ -54,8 +75,10 @@ export async function embedding(text: string, title?: string) {
 }
 
 function generateText(request: Omit<GenerateContentParameters, 'model'>) {
-  const client = ai();
-  return withTextFallback(model => client.models.generateContent({ ...request, model }));
+  return callGemini('text generation', () => {
+    const client = ai();
+    return withTextFallback(model => client.models.generateContent({ ...request, model }));
+  });
 }
 
 export async function decide(context: PlannerContext, onUsage: UsageReporter): Promise<Decision> {
@@ -81,14 +104,14 @@ export async function decide(context: PlannerContext, onUsage: UsageReporter): P
 }
 
 export async function voiceToken() {
-  const token = await ai().authTokens.create({
+  const token = await callGemini('voice token', () => ai().authTokens.create({
     config: {
       uses: 1,
       expireTime: new Date(Date.now() + 5 * 60_000).toISOString(),
       newSessionExpireTime: new Date(Date.now() + 60_000).toISOString(),
       liveConnectConstraints: { model: liveModel, config: liveConfig },
     },
-  });
+  }));
   if (!token.name) throw new ServiceError('voice_token_unavailable', 502);
   return token.name;
 }

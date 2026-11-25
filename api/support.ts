@@ -19,6 +19,9 @@ const errors: Record<string, string> = {
   upstream_busy: 'Gemini is temporarily at capacity. Retry this turn in a moment.',
   groq_speech_failed: 'Orpheus could not generate the audio reply.',
   gemini_not_configured: 'Set GEMINI_API_KEY on the server to start.',
+  gemini_access_denied: 'Gemini denied access. Check the server API key and its permissions.',
+  gemini_resource_unavailable: 'The configured Gemini model or endpoint is unavailable.',
+  voice_token_rejected: 'Gemini rejected the request to start a voice session.',
   unavailable: 'Support is temporarily unavailable. Try again.',
 };
 
