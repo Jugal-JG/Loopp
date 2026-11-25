@@ -45,7 +45,7 @@ function App() {
   const voice = useRef<Awaited<ReturnType<typeof import('./voice').startVoice>> | null>(null);
   const voiceStart = useRef<AbortController | null>(null);
   const working = useRef(false);
-  const queued = useRef<{ text: string; speechEnd: number; profile: Profile } | null>(null);
+  const queued = useRef<{ text: string; speechEnd: number; profile: Profile; epoch: number }[]>([]);
   const liveUsage = useRef<unknown>(null);
   const feed = useRef<HTMLDivElement>(null);
   const profileRef = useRef(profile);
@@ -93,12 +93,12 @@ function App() {
   function update(id: string, modify: (turn: Turn) => Turn) {
     setTurns(items => items.map(item => item.id === id ? modify(item) : item));
   }
-  async function submit(text: string, mode: Mode, activeProfile: Profile, retryId?: string, speechEnd?: number) {
+  async function submit(text: string, mode: Mode, activeProfile: Profile, retryId?: string, speechEnd?: number, speechEpoch?: number) {
     const value = text.trim();
     if (!value || working.current) return;
     const id = retryId ?? crypto.randomUUID();
     const voiceSession = voice.current;
-    const epoch = voiceSession?.currentEpoch();
+    const epoch = speechEpoch ?? voiceSession?.currentEpoch();
     const start = performance.now();
     const elapsed = () => Math.round(performance.now() - start);
     let completed = false;
@@ -109,6 +109,12 @@ function App() {
     let approvedText = '';
     working.current = true;
     setBusy(true);
+    function releaseTurn() {
+      working.current = false;
+      setBusy(false);
+      const next = queued.current.shift();
+      if (next) void submit(next.text, 'voice', next.profile, undefined, next.speechEnd, next.epoch);
+    }
     if (!retryId) setSimulation('');
     setStatus('');
     setSelected(id);
@@ -144,13 +150,14 @@ function App() {
         }
         if (event === 'reply') { approvedText = data.reply.text; update(id, turn => ({ ...turn, reply: data.reply })); }
         if (event === 'done') {
-          completed = true;
           setPending(data.pending);
           update(id, turn => ({ ...turn, traces: [...turn.traces, { event: 'timing', stage: 'turn complete', elapsedMs: elapsed() }] }));
+          completed = true;
+          releaseTurn();
         }
         if (event === 'failure') throw new Error(data.message);
         if (event === 'browserAudio') playBrowserVoice();
-        if (event === 'voiceError') {
+        if (event === 'voiceError' && epoch === voiceSession?.currentEpoch()) {
           const usedFallback = !receivedAudio && playBrowserVoice();
           setStatus(usedFallback ? `${data.message} Trying your browser voice.` : data.message);
         }
@@ -163,13 +170,9 @@ function App() {
       });
       if (!completed) throw new Error('Connection interrupted. Retry this turn to recover its saved result.');
     } catch (error) {
-      update(id, turn => ({ ...turn, reply: { kind: 'error', text: (error as Error).message } }));
+      if (!completed) update(id, turn => ({ ...turn, reply: { kind: 'error', text: (error as Error).message } }));
     } finally {
-      working.current = false;
-      setBusy(false);
-      const next = queued.current;
-      queued.current = null;
-      if (next) void submit(next.text, 'voice', next.profile, undefined, next.speechEnd);
+      if (!completed) releaseTurn();
     }
   }
   async function toggleVoice() {
@@ -178,7 +181,7 @@ function App() {
       voiceStart.current = null;
       voice.current?.close();
       voice.current = null;
-      queued.current = null;
+      queued.current = [];
       setPhase('Voice off');
       setMuted(false);
       setLevel(0);
@@ -195,10 +198,10 @@ function App() {
       const session = await startVoice({
         phase: setPhase, wave: setLevel, partial: setPartial, notice: setStatus, usage: usage => { liveUsage.current = usage; },
         failure: error => { setStatus(error); setPhase('Voice off'); setMuted(false); setLevel(0); setPartial(''); voice.current = null; },
-        final: (text, speechEnd) => {
+        final: (text, speechEnd, epoch) => {
           const activeProfile = profileRef.current;
-          if (working.current) queued.current = { text, speechEnd, profile: activeProfile };
-          else void submit(text, 'voice', activeProfile, undefined, speechEnd);
+          if (working.current) queued.current.push({ text, speechEnd, profile: activeProfile, epoch });
+          else void submit(text, 'voice', activeProfile, undefined, speechEnd, epoch);
         },
       }, controller.signal);
       if (controller.signal.aborted) session.close();
@@ -214,7 +217,7 @@ function App() {
     if (working.current || !window.confirm('Clear the conversation and any pending refund confirmation?')) return;
     working.current = true;
     setBusy(true);
-    queued.current = null;
+    queued.current = [];
     if (voice.current || voiceStart.current) await toggleVoice();
     try {
       const response = await fetch(endpoint('clear'), { method: 'POST' });
@@ -292,7 +295,7 @@ function App() {
               disabled={phase === 'Connecting'} onClick={() => {
                 if (phase === 'Voice off') { void toggleVoice(); return; }
                 if (!voice.current) return;
-                if (!muted) queued.current = null;
+                if (!muted) queued.current = [];
                 voice.current.setMuted(!muted);
                 setMuted(!muted);
               }}>

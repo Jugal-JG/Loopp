@@ -4,7 +4,7 @@ import { db, issueRefund, searchPolicy, takeBudget, type Turn } from '../src/sto
 import { decide, isRateLimit, ServiceError, speech, voiceToken, textModel, verifyEvidence } from '../src/provider.js';
 import { accounts, runSupportTurn, type Pending, type Profile, type Reply } from '../src/agent.js';
 import { adminEmail, cookie, googleEnabled, googleFinish, googleProfile, googleStart, isAdmin, readCookie, secretMatches } from '../src/identity.js';
-import { deliverEmail } from '../src/notifications.js';
+import { deliverEmail, emailConfigured } from '../src/notifications.js';
 import { orpheusSpeech } from '../src/orpheus.js';
 import { playSpeechWithFallback } from '../src/speech-output.js';
 
@@ -130,9 +130,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, services: typeo
     if (action === 'tickets' && req.method === 'GET') {
       const result = await db().query(`SELECT t.reference,t.reason,t.profile,t.status,t.created_at,t.reviewed_at,t.request_text,s.email,
           COALESCE((SELECT json_agg(m ORDER BY m.created_at) FROM ticket_messages m WHERE m.reference=t.reference),'[]') AS messages,
-          (SELECT count(*)::int FROM ticket_email e WHERE e.reference=t.reference AND sent_at IS NULL) AS queued
+          (SELECT count(*)::int FROM ticket_email e WHERE e.reference=t.reference AND sent_at IS NULL) AS queued,
+          (SELECT e.last_error FROM ticket_email e WHERE e.reference=t.reference AND sent_at IS NULL
+            AND e.last_error IS NOT NULL ORDER BY e.created_at DESC LIMIT 1) AS email_error
         FROM tickets t JOIN demo_sessions s ON s.id=t.session_id WHERE t.deleted_at IS NULL ORDER BY t.created_at DESC LIMIT 100`);
-      return json(res, 200, { tickets: result.rows });
+      return json(res, 200, { tickets: result.rows, emailConfigured: emailConfigured() });
     }
     if (action === 'delete-ticket' && req.method === 'POST') {
       const { reference } = await readBody(req);
@@ -174,8 +176,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, services: typeo
       const { reference } = await readBody(req);
       const rows = await db().query(`SELECT e.id FROM ticket_email e JOIN tickets t ON t.reference=e.reference
         WHERE e.reference=$1 AND e.sent_at IS NULL AND t.deleted_at IS NULL ORDER BY e.created_at LIMIT 5`, [reference]);
-      await Promise.all(rows.rows.map(row => deliverEmail(row.id)));
-      return json(res, 200, { ok: true });
+      const deliveries = await Promise.all(rows.rows.map(row => deliverEmail(row.id)));
+      return json(res, 200, { ok: true, accepted: deliveries.filter(delivery => delivery === 'sent').length });
     }
     if (action === 'clear' && req.method === 'POST') {
       const cleared = await db().query(`WITH reset AS (
@@ -274,7 +276,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, services: typeo
                 FROM ticket WHERE $7::text IS NOT NULL ON CONFLICT DO NOTHING
               ) SELECT reference FROM ticket`, [session.id, id, `HD-${randomUUID().slice(0, 8).toUpperCase()}`, reason, profile, message, session.kind === 'google' ? session.email : null]);
               const reference = result.rows[0].reference;
-              if (session.kind === 'google' && session.email && process.env.RESEND_API_KEY && process.env.NOTIFICATION_FROM) {
+              if (session.kind === 'google' && session.email && emailConfigured()) {
                 notification = deliverEmail(`created-${reference}`);
               }
               return reference;
@@ -294,6 +296,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, services: typeo
       for (const [index, sentence] of sentences.entries()) emit('text', { text: `${index ? ' ' : ''}${sentence}` });
       await db().query('UPDATE support_turns SET reply=$3,traces=$4 WHERE session_id=$1 AND id=$2', [session.id, id, reply, JSON.stringify(traces)]);
       emit('reply', { reply });
+      const state = (await db().query('SELECT pending FROM demo_sessions WHERE id=$1', [session.id])).rows[0];
+      await release();
+      emit('done', { pending: state.pending?.profile });
       if (mode === 'voice' && !res.destroyed && reply.kind !== 'error') {
         const voiceOutput = process.env.TTS_OUTPUT || 'auto';
         try {
@@ -321,9 +326,6 @@ async function handle(req: IncomingMessage, res: ServerResponse, services: typeo
         }
         await db().query('UPDATE support_turns SET traces=$3 WHERE session_id=$1 AND id=$2', [session.id, id, JSON.stringify(traces)]);
       }
-      const state = (await db().query('SELECT pending FROM demo_sessions WHERE id=$1', [session.id])).rows[0];
-      await release();
-      emit('done', { pending: state.pending?.profile });
       await notification;
       res.end();
     } finally {

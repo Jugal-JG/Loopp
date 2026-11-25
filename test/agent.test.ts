@@ -27,14 +27,20 @@ test('voice playback questions are answered as app help without an escalation', 
   assert.deepEqual(flow.calls, []);
 });
 
-test('greetings and questions about capabilities answer directly without retrieval or escalation', async () => {
-  const flow = fixture([]);
-  for (const message of ['Hello!', 'How can you help me?', 'What can you do?']) {
-    const answer = await flow.run({ message });
-    assert.equal(answer.kind, 'answer');
-    assert.match(answer.text, /billing and receipts/);
-  }
-  assert.deepEqual(flow.contexts, []);
+test('Gemini handles greetings and capabilities and declines off-topic requests without escalation', async () => {
+  const flow = fixture([
+    { action: 'greet', greeting: 'Hello! Good to hear from you.' },
+    { action: 'explainCapabilities' },
+    { action: 'declineOffTopic' },
+  ]);
+  const greeting = await flow.run({ message: 'Good morning!' });
+  assert.deepEqual(greeting, { kind: 'answer', text: 'Hello! Good to hear from you.' });
+  const capabilities = await flow.run({ message: 'What can you do?' });
+  assert.match(capabilities.text, /billing and receipts/);
+  const offTopic = await flow.run({ message: 'Hi! What is 2 + 2?' });
+  assert.deepEqual(offTopic, { kind: 'answer', text: 'I can only answer Loopp help desk questions.' });
+  assert.equal(flow.contexts.length, 3);
+  assert.deepEqual(flow.events.filter(event => !event.startsWith('verifyAccount:')), []);
   assert.deepEqual(flow.calls, []);
 });
 
@@ -114,7 +120,7 @@ test('escalates low similarity even when the model rewrites the query toward a m
   const flow = fixture([{ action: 'searchPolicy', query: 'refund policy' }], {
     search: async query => [{ ...refund, score: query === 'refund policy' ? 0.88 : 0.24 }],
   });
-  assert.equal((await flow.run({ message: 'Instructions for writing a wedding toast' })).kind, 'escalated');
+  assert.equal((await flow.run({ message: 'Where can I see my workspace billing status?' })).kind, 'escalated');
   assert.deepEqual(flow.calls, ['low_retrieval_similarity']);
 });
 

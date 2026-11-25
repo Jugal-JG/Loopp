@@ -146,7 +146,10 @@ test(recoverInterim ? 'Send voice automatically submits a stalled transcript onc
     sendTranscript = message => socket.send(JSON.stringify(message));
     socket.onMessage(raw => {
       const request = JSON.parse(String(raw));
-      if (request.setup) socket.send(JSON.stringify({ setupComplete: {} }));
+      if (request.setup) {
+        expect(request.setup.inputAudioTranscription.mode).toBe('VERBATIM');
+        socket.send(JSON.stringify({ setupComplete: {} }));
+      }
       if (request.realtimeInput?.audio) microphoneFrames++;
     });
   });
@@ -155,12 +158,15 @@ test(recoverInterim ? 'Send voice automatically submits a stalled transcript onc
     if (action === 'auth-options') return route.fulfill({ json: {} });
     if (action === 'voice') return route.fulfill({ json: { token: 'auth_tokens/test' } });
     if (action === 'session') return route.fulfill({ json: { turns: [] } });
-    expect(route.request().postDataJSON()).toMatchObject({ message: 'Find my receipt', mode: 'voice' });
+    expect(route.request().postDataJSON()).toMatchObject({
+      message: sentTurns === 0 ? 'Find my receipt' : 'Compare Basic and Pro',
+      mode: 'voice',
+    });
     sentTurns++;
-    const reply = { kind: 'answer', text: 'Download the receipt in Billing.' };
+    const reply = { kind: 'answer', text: sentTurns === 1 ? 'Download the receipt in Billing.' : 'Here is the plan comparison.' };
     return route.fulfill({ contentType: 'text/event-stream', body: sse([
       ['text', { text: reply.text }], ['reply', { reply }],
-      ['browserAudio', {}], ['done', {}],
+      ['done', {}], ['browserAudio', {}],
     ]) });
   });
   await page.goto('/');
@@ -195,8 +201,10 @@ test(recoverInterim ? 'Send voice automatically submits a stalled transcript onc
   await page.getByRole('button', { name: 'Unmute mic' }).click();
   await expect(page.getByText('Listening', { exact: true })).toBeVisible({ timeout: 1200 });
   await expect(page.locator('body')).toHaveAttribute('data-speech-cancelled', 'true');
+  sendTranscript!({ serverContent: { inputTranscription: { text: 'Compare Basic and Pro' } } });
+  await expect(page.getByText('Here is the plan comparison.')).toBeVisible();
   await page.getByRole('button', { name: 'Stop voice' }).click();
   await expect(page.getByRole('textbox', { name: 'Your message' })).toBeEditable();
-  expect(sentTurns).toBe(1);
+  expect(sentTurns).toBe(2);
 });
 }

@@ -1,6 +1,6 @@
 import { chunks, type Match } from './policies.js';
 
-export const PROMPT_VERSION = 'support-v2';
+export const PROMPT_VERSION = 'support-v3';
 export const MAX_STEPS = 6;
 export const PRO_REFUND_POLICY = 'pro-billing/refund-eligibility';
 const capabilities: Reply = {
@@ -17,7 +17,7 @@ export const accounts: Record<Profile, Account> = {
 
 export type Reply = { text: string; kind: 'answer' | 'clarify' | 'confirmation' | 'refunded' | 'escalated' | 'error'; sources?: string[] };
 export type Decision = {
-  action: string; query?: string; sourceId?: string; quote?: string; sourceIds?: string[];
+  action: string; greeting?: string; query?: string; sourceId?: string; quote?: string; sourceIds?: string[];
   subqueries?: { query: string; publicTier?: Account['tier'] }[];
 };
 export type PlannerContext = { message: string; history: AgentInput['history']; account: Account; matches?: Match[]; allowed: string[] };
@@ -45,10 +45,6 @@ export function evidence(matches: Match[], threshold: number, sourceId?: string,
 
 export async function runSupportTurn(input: AgentInput, tools: AgentTools, emit: Trace): Promise<Reply> {
   const question = input.message.trim();
-  if (/^(?:(?:hi|hello|hey)[.!?, ]*|(?:how can you help(?: me)?|what can you (?:do|help(?: me)? with)|what do you do)[?.! ]*)$/i.test(question)) {
-    emit('trace', { stage: 'app help', topic: 'capabilities' });
-    return capabilities;
-  }
   if (/^(?:why (?:are you (?:not|aren.t you)|aren.t you|didn.t you|did you not) (?:speak|speaking|read|say)|(?:why (?:is there|was there) )?no (?:voice|audio|sound)|(?:i )?can.t hear you|why (?:isn.t|is not) (?:the |your )?(?:voice|audio|sound) working)/i.test(question)) {
     emit('trace', { stage: 'app help', topic: 'voice playback' });
     return { kind: 'answer', text: 'Typed messages get a text reply. Voice turns normally play audio. If a voice reply is silent, check your browser volume and output device. An audio error will appear above the composer if synthesis fails.' };
@@ -86,7 +82,7 @@ export async function runSupportTurn(input: AgentInput, tools: AgentTools, emit:
   }
   for (let step = 0; step < MAX_STEPS; step++) {
     const allowed = !account ? ['verifyAccount'] : [
-      'clarify', 'createEscalation', ...(!matches ? ['searchPolicy', 'explainCapabilities'] : ['answer', 'prepareRefund']),
+      'clarify', 'createEscalation', ...(!matches ? ['searchPolicy', 'greet', 'explainCapabilities', 'declineOffTopic'] : ['answer', 'prepareRefund']),
       ...(input.confirm && input.pending ? ['issueRefund'] : []),
     ];
     emit('trace', { stage: 'decision', promptVersion: PROMPT_VERSION, step: step + 1, allowed });
@@ -155,6 +151,10 @@ export async function runSupportTurn(input: AgentInput, tools: AgentTools, emit:
         return { kind: 'clarify', text: 'Could you tell me a little more about what you need? For example, are you asking about billing, signing in, or managing your workspace?' };
       case 'explainCapabilities':
         return capabilities;
+      case 'greet':
+        return { kind: 'answer', text: result.greeting?.trim().slice(0, 200) || 'Hello!' };
+      case 'declineOffTopic':
+        return { kind: 'answer', text: 'I can only answer Loopp help desk questions.' };
       default:
         return handoff('unsupported_or_requested');
     }
