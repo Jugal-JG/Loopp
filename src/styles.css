@@ -41,7 +41,9 @@ label { display: grid; gap: 5px; }
 .conversation, aside, .gate { min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 18px; background: #fff; box-shadow: 0 9px 26px var(--shadow); }
 .conversation { display: flex; flex-direction: column; min-height: 580px; height: calc(100dvh - 112px); }
 .toolbar { padding: 18px 22px; border-bottom: 1px solid var(--divider); }
+.feed-wrap { position: relative; display: flex; flex: 1; min-height: 0; }
 .feed { flex: 1; overflow: auto; padding: 22px; }
+.scroll-down { position: absolute; bottom: 12px; right: 18px; width: 36px; height: 36px; padding: 0; border-radius: 50%; font-size: 20px; }
 .welcome { text-align: center; display: grid; place-items: center; gap: 14px; margin: clamp(20px, 10vh, 90px) auto; }
 .prompts { display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; }
 .turn { display: grid; gap: 12px; margin-bottom: 22px; }

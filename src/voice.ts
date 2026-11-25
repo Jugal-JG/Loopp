@@ -1,4 +1,5 @@
-import { AudioTranscriptionConfigMode, GoogleGenAI, Modality } from '@google/genai';
+import { GoogleGenAI, type Transcription } from '@google/genai';
+import { liveConfig, liveModel } from './live-transcription.js';
 
 export type VoiceCallbacks = {
   partial: (text: string) => void;
@@ -10,7 +11,7 @@ export type VoiceCallbacks = {
   usage: (metadata: unknown) => void;
 };
 
-const silenceMs = 450;
+const silenceMs = 700;
 const interimFallbackMs = 650;
 const transcriptStallMs = 10_000;
 const speechOnsetLevel = 0.025;
@@ -18,12 +19,16 @@ const speechContinuationLevel = 0.015;
 const playbackSpeechLevel = 0.035;
 const playbackSpeechFrames = 6; // The worklet emits about 20 ms per frame.
 
+function englishText(transcript?: Transcription) {
+  if (transcript?.languageCode && !/^en(?:-|$)/i.test(transcript.languageCode)) return undefined;
+  return transcript?.text?.trim();
+}
+
 function encode(bytes: Uint8Array) {
   return btoa(String.fromCharCode(...bytes));
 }
 
 export async function startVoice(callbacks: VoiceCallbacks, signal: AbortSignal) {
-  window.speechSynthesis?.getVoices(); // Start loading installed voices during mic setup.
   const media = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
   const context = new AudioContext();
   let session: Awaited<ReturnType<GoogleGenAI['live']['connect']>> | undefined;
@@ -41,17 +46,12 @@ export async function startVoice(callbacks: VoiceCallbacks, signal: AbortSignal)
   let transcriptTimeout: ReturnType<typeof setTimeout> | undefined;
   let silenceTimer: ReturnType<typeof setTimeout> | undefined;
   let interim = '';
-  let pending: { speechEnd: number; epoch: number; submitted: boolean } | undefined;
+  let pending: { speechEnd: number; epoch: number; submitted: boolean; preserveInterim: boolean } | undefined;
   const analyser = context.createAnalyser();
   const waveform = new Float32Array(analyser.fftSize);
   analyser.connect(context.destination);
   function interrupt() {
     epoch++;
-    if (fallback) {
-      fallback = undefined;
-      window.speechSynthesis.cancel();
-      callbacks.phase('Listening');
-    }
     playbackCursor = 0;
     if (players.size) {
       for (const source of players) source.stop();
@@ -59,7 +59,6 @@ export async function startVoice(callbacks: VoiceCallbacks, signal: AbortSignal)
       callbacks.phase('Listening');
     }
   }
-  let fallback: SpeechSynthesisUtterance | undefined;
   function close() {
     if (closed) return;
     closed = true;
@@ -94,16 +93,18 @@ export async function startVoice(callbacks: VoiceCallbacks, signal: AbortSignal)
       callbacks.failure(message);
     }
     const connecting = ai.live.connect({
-      model: 'gemini-3.5-transcribe-live',
-      config: { responseModalities: [Modality.TEXT], inputAudioTranscription: { languageCodes: [], mode: AudioTranscriptionConfigMode.VERBATIM } },
+      model: liveModel,
+      config: liveConfig,
       callbacks: {
         onmessage: message => {
           if (closed) return;
           if (message.setupComplete) ready();
           if (message.usageMetadata) callbacks.usage(message.usageMetadata);
           const content = message.serverContent;
-          const preview = content?.interimInputTranscription?.text?.trim();
-          if (preview && !muted && !pending?.submitted) {
+          const transcription = content?.inputTranscription;
+          const preview = englishText(content?.interimInputTranscription)
+            || (transcription?.finished === false ? englishText(transcription) : undefined);
+          if (preview && (!muted || pending) && !pending?.submitted) {
             interim = preview;
             callbacks.partial(preview);
             if (!pending && !lastLoud) {
@@ -111,24 +112,26 @@ export async function startVoice(callbacks: VoiceCallbacks, signal: AbortSignal)
               silenceTimer = setTimeout(finishSpeech, silenceMs);
             }
           }
-          if (content?.inputTranscription) {
-            const text = content.inputTranscription.text?.trim();
+          if (transcription && transcription.finished !== false) {
+            const text = englishText(transcription);
             if (pending) {
               const finished = pending;
               clearTimeout(finalizationTimer);
               clearTimeout(transcriptTimeout);
               pending = undefined;
+              const capturedText = text || (finished.preserveInterim && !transcription.text?.trim() ? interim : '');
               interim = '';
-              if (!muted) {
-                if (!finished.submitted) {
-                  callbacks.phase('Listening');
-                  if (text) submitTranscript(text, finished.speechEnd, finished.epoch);
-                  else {
-                    callbacks.partial('');
-                    callbacks.notice('No speech was transcribed. Try speaking again or use chat.');
-                  }
+              if (!finished.submitted) {
+                callbacks.phase('Listening');
+                if (capturedText) submitTranscript(capturedText, finished.speechEnd, finished.epoch);
+                else {
+                  callbacks.partial('');
+                  callbacks.notice('No speech was transcribed. Try speaking again or use chat.');
                 }
-                if (lastLoud) {
+              }
+              if (lastLoud) {
+                if (muted) finishSpeech();
+                else {
                   sendBufferedAudio();
                   clearTimeout(silenceTimer);
                   silenceTimer = setTimeout(finishSpeech, Math.max(0, silenceMs - (performance.now() - lastLoud)));
@@ -188,11 +191,11 @@ export async function startVoice(callbacks: VoiceCallbacks, signal: AbortSignal)
       } catch { fail('Could not send microphone audio. Reconnect voice or use chat.'); }
     }
     function finishSpeech() {
-      if (closed || muted || !session || pending || (!lastLoud && !interim)) return;
+      if (closed || !session || pending || (!lastLoud && !interim)) return;
       clearTimeout(silenceTimer);
       sendBufferedAudio();
       if (closed) return;
-      const utterance = { speechEnd: lastLoud || performance.now(), epoch, submitted: false };
+      const utterance = { speechEnd: lastLoud || performance.now(), epoch, submitted: false, preserveInterim: muted };
       pending = utterance;
       lastLoud = 0;
       try {
@@ -201,9 +204,9 @@ export async function startVoice(callbacks: VoiceCallbacks, signal: AbortSignal)
         fail('Live transcription disconnected. Reconnect voice or use chat.');
         return;
       }
-      callbacks.phase('Transcribing…');
+      callbacks.phase('Transcribingâ€¦');
       finalizationTimer = setTimeout(() => {
-        if (!interim || muted) return;
+        if (!interim) return;
         utterance.submitted = true;
         submitTranscript(interim, utterance.speechEnd, utterance.epoch);
         callbacks.phase('Listening');
@@ -224,7 +227,7 @@ export async function startVoice(callbacks: VoiceCallbacks, signal: AbortSignal)
       if (closed || muted || !session) return;
       const pcm = event.data as Int16Array;
       level = Math.sqrt(pcm.reduce((sum, sample) => sum + (sample / 32768) ** 2, 0) / pcm.length);
-      const playing = Boolean(fallback || players.size);
+      const playing = players.size > 0;
       const continuing = lastLoud && performance.now() - lastLoud < silenceMs;
       const threshold = playing ? playbackSpeechLevel : continuing ? speechContinuationLevel : speechOnsetLevel;
       loudFrames = level > threshold ? loudFrames + 1 : 0;
@@ -269,50 +272,16 @@ export async function startVoice(callbacks: VoiceCallbacks, signal: AbortSignal)
       setMuted(value: boolean) {
         muted = value;
         media.getAudioTracks().forEach(track => { track.enabled = !value; });
-        level = loudFrames = lastLoud = buffered = 0;
-        audioFrames = [];
-        playbackPreRoll = [];
-        clearTimeout(silenceTimer);
-        interim = '';
-        callbacks.partial('');
         if (value) {
-          if (pending) pending.submitted = true;
-          else {
-            try { session?.sendRealtimeInput({ audioStreamEnd: true }); } catch { fail('Live transcription disconnected. Reconnect voice to retry.'); }
-          }
+          level = loudFrames = 0;
+          playbackPreRoll = [];
+          clearTimeout(silenceTimer);
+          if (pending) pending.preserveInterim = true;
+          finishSpeech();
         }
       },
       currentEpoch: () => epoch,
       finishSpeech,
-      speakLocally(text: string, expectedEpoch: number, onStart: () => void, onError: () => void) {
-        if (closed || epoch !== expectedEpoch || !('speechSynthesis' in window) || !('SpeechSynthesisUtterance' in window)) return false;
-        const utterance = new SpeechSynthesisUtterance(text);
-        const englishVoices = window.speechSynthesis.getVoices().filter(voice => /^en\b/i.test(voice.lang));
-        const female = /\b(zira|jenny|aria|samantha|karen|moira|tessa|veena|victoria|female)\b/i;
-        const preferred = englishVoices.find(voice => voice.localService && female.test(voice.name))
-          ?? englishVoices.find(voice => voice.localService)
-          ?? englishVoices.find(voice => female.test(voice.name));
-        if (preferred) utterance.voice = preferred;
-        fallback = utterance;
-        const finish = () => {
-          if (fallback !== utterance) return;
-          fallback = undefined;
-          callbacks.phase('Listening');
-        };
-        utterance.onstart = () => {
-          if (fallback !== utterance) return;
-          callbacks.phase('Speaking');
-          onStart();
-        };
-        utterance.onend = finish;
-        utterance.onerror = () => {
-          if (fallback !== utterance) return;
-          finish();
-          onError();
-        };
-        window.speechSynthesis.speak(utterance);
-        return true;
-      },
       async play(base64: string, mime: string, expectedEpoch: number) {
         if (closed || epoch !== expectedEpoch) return false;
         const bytes = Uint8Array.from(atob(base64), char => char.charCodeAt(0));
@@ -332,7 +301,8 @@ export async function startVoice(callbacks: VoiceCallbacks, signal: AbortSignal)
           source.disconnect();
           if (players.delete(source) && !players.size) callbacks.phase('Listening');
         };
-        const startAt = Math.max(context.currentTime + 0.025, playbackCursor);
+        const now = context.currentTime;
+        const startAt = playbackCursor > now ? playbackCursor : now + 0.025;
         source.start(startAt);
         playbackCursor = startAt + audio.duration;
         callbacks.phase('Speaking');

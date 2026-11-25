@@ -39,6 +39,7 @@ function App() {
   const [muted, setMuted] = useState(false);
   const [showTickets, setShowTickets] = useState(false);
   const [partial, setPartial] = useState('');
+  const [showScrollDown, setShowScrollDown] = useState(false);
   const [level, setLevel] = useState(0);
   const [simulation, setSimulation] = useState('');
   const [selected, setSelected] = useState('');
@@ -69,7 +70,9 @@ function App() {
     void load();
     return () => { voiceStart.current?.abort(); voice.current?.close(); };
   }, []);
-  useEffect(() => { if (feed.current) feed.current.scrollTop = feed.current.scrollHeight; }, [turns, partial]);
+  useEffect(() => {
+    if (!showScrollDown && feed.current) feed.current.scrollTop = feed.current.scrollHeight;
+  }, [turns, partial, showScrollDown]);
 
   async function login(event: FormEvent) {
     event.preventDefault();
@@ -106,7 +109,6 @@ function App() {
     let firstAudio = true;
     let receivedAudio = false;
     let audioQueue = Promise.resolve();
-    let approvedText = '';
     working.current = true;
     setBusy(true);
     function releaseTurn() {
@@ -135,13 +137,6 @@ function App() {
         update(id, turn => ({ ...turn, traces: [...turn.traces, { event: 'timing', stage, elapsedMs: elapsed(),
           speechEndToAudioMs: speechEnd === undefined ? null : Math.round(performance.now() - speechEnd) }] }));
       }
-      function playBrowserVoice() {
-        if (!voiceSession || epoch === undefined || epoch !== voiceSession.currentEpoch() || !approvedText) return false;
-        const played = voiceSession.speakLocally(approvedText, epoch, () => recordPlayback('browser speech started'),
-          () => setStatus('Browser speech could not start. Your reply is available in the conversation.'));
-        if (!played) setStatus('Browser speech is unavailable. Your reply is available in the conversation.');
-        return played;
-      }
       await readEvents(response, (event, data) => {
         if (['trace', 'tool', 'usage'].includes(event)) update(id, turn => ({ ...turn, traces: [...turn.traces, { event, ...data }] }));
         if (event === 'text') {
@@ -149,7 +144,7 @@ function App() {
           firstText = false;
           update(id, turn => ({ ...turn, draft: (turn.draft ?? '') + data.text, traces: [...turn.traces, ...timing] }));
         }
-        if (event === 'reply') { approvedText = data.reply.text; update(id, turn => ({ ...turn, reply: data.reply })); }
+        if (event === 'reply') { update(id, turn => ({ ...turn, reply: data.reply })); }
         if (event === 'done') {
           setPending(data.pending);
           update(id, turn => ({ ...turn, traces: [...turn.traces, { event: 'timing', stage: 'turn complete', elapsedMs: elapsed() }] }));
@@ -157,14 +152,7 @@ function App() {
           releaseTurn();
         }
         if (event === 'failure') throw new Error(data.message);
-        if (event === 'browserAudio') {
-          if (typeof data.text === 'string') approvedText = data.text;
-          playBrowserVoice();
-        }
-        if (event === 'voiceError' && epoch === voiceSession?.currentEpoch()) {
-          const usedFallback = !receivedAudio && playBrowserVoice();
-          setStatus(usedFallback ? `${data.message} Trying your browser voice.` : data.message);
-        }
+        if (event === 'voiceError' && epoch === voiceSession?.currentEpoch()) setStatus(data.message);
         if (event === 'audio' && voiceSession && epoch !== undefined) {
           if (!receivedAudio) console.info('Loopp voice', {
             requestId: response.headers.get('X-Request-Id'), stage: 'first audio received',
@@ -239,6 +227,10 @@ function App() {
     finally { working.current = false; setBusy(false); }
   }
   const shown = turns.find(turn => turn.id === selected) ?? turns.at(-1);
+  const usageTraces = shown?.traces.filter(trace => trace.event === 'usage') ?? [];
+  const recordedCosts = usageTraces.flatMap(trace =>
+    typeof trace.estimatedCostUsd === 'number' && Number.isFinite(trace.estimatedCostUsd) ? [trace.estimatedCostUsd] : []);
+  const estimatedCost = recordedCosts.reduce((total, cost) => total + cost, 0);
   return <main>
     <header><div className="brand"><span className="logo" aria-hidden="true">L</span><div><strong>Loopp</strong><small>Support workspace</small></div></div>
       {auth === 'ready' && <nav className="header-actions">{identity.admin && <button className="secondary" onClick={() => {
@@ -268,21 +260,31 @@ function App() {
     </section> : showTickets ? <Tickets /> : <div className={drawer ? 'workspace expanded' : 'workspace'}>
       <section className="conversation" aria-label="Support conversation">
         <div className="toolbar"><div><h1>Help Desk</h1><small>Fictional customer support</small></div><button className="secondary" disabled={busy || !turns.length} onClick={() => void clearChat()}>Clear chat</button><label>{identity.profile ? 'Your plan' : 'Demo account'}<select value={profile} disabled={busy || !!identity.profile} onChange={event => setProfile(event.target.value as Profile)}><option value="pro">Pro · monthly</option><option value="basic">Basic · monthly</option><option value="annual">Pro · expired annual</option></select></label></div>
-        <div className="feed" ref={feed}>
-          {!turns.length && <div className="welcome"><span className="logo">L</span><h2>How can we help?</h2><div className="prompts">{prompts.map(prompt => <button key={prompt} className="secondary" onClick={() => void submit(prompt, 'chat', profile)}>{prompt}</button>)}</div></div>}
-          {turns.map(turn => <article key={turn.id} className="turn">
-            <div className="customer"><small>{turn.mode === 'voice' ? 'You · voice' : 'You'} · {turn.profile}</small><p>{turn.message}</p></div>
-            <div className="agent"><small>Loopp Support</small>
-              {turn.traces.filter(trace => trace.event === 'tool' && trace.status === 'started').map((trace, index) => {
-                const result = turn.traces.findLast(entry => entry.event === 'tool' && entry.name === trace.name && entry.status !== 'started');
-                return <div className="step" key={index}><span aria-hidden="true">{result?.status === 'completed' ? '✓' : result?.status === 'failed' ? '×' : '◌'}</span> {labels[trace.name!] ?? trace.name}</div>;
-              })}
-              <p aria-live="polite">{turn.reply?.text ?? turn.draft ?? (busy ? 'Working…' : 'This turn was interrupted.')}</p>
-              {turn.reply?.sources?.map(source => <span className="source" key={source}>{source}</span>)}
-              {(!turn.reply || turn.reply.kind === 'error') && !busy && <button className="secondary" onClick={() => void submit(turn.message, turn.mode, turn.profile, turn.id)}>Retry turn</button>}
-            </div>
-          </article>)}
-          {partial && <p className="transcript" aria-live="polite">{partial}</p>}
+        <div className="feed-wrap">
+          <div className="feed" ref={feed} onScroll={event => {
+            const { scrollHeight, scrollTop, clientHeight } = event.currentTarget;
+            setShowScrollDown(scrollHeight - scrollTop - clientHeight > 48);
+          }}>
+            {!turns.length && <div className="welcome"><span className="logo">L</span><h2>How can we help?</h2><div className="prompts">{prompts.map(prompt => <button key={prompt} className="secondary" onClick={() => void submit(prompt, 'chat', profile)}>{prompt}</button>)}</div></div>}
+            {turns.map(turn => <article key={turn.id} className="turn">
+              <div className="customer"><small>{turn.mode === 'voice' ? 'You · voice' : 'You'} · {turn.profile}</small><p>{turn.message}</p></div>
+              <div className="agent"><small>Loopp Support</small>
+                {turn.traces.filter(trace => trace.event === 'tool' && trace.status === 'started').map((trace, index) => {
+                  const result = turn.traces.findLast(entry => entry.event === 'tool' && entry.name === trace.name && entry.status !== 'started');
+                  return <div className="step" key={index}><span aria-hidden="true">{result?.status === 'completed' ? '✓' : result?.status === 'failed' ? '×' : '◌'}</span> {labels[trace.name!] ?? trace.name}</div>;
+                })}
+                <p aria-live="polite">{turn.reply?.text ?? turn.draft ?? (busy ? 'Working…' : 'This turn was interrupted.')}</p>
+                {turn.reply?.sources?.map(source => <span className="source" key={source}>{source}</span>)}
+                {(!turn.reply || turn.reply.kind === 'error') && !busy && <button className="secondary" onClick={() => void submit(turn.message, turn.mode, turn.profile, turn.id)}>Retry turn</button>}
+              </div>
+            </article>)}
+            {partial && <p className="transcript" aria-live="polite">{partial}</p>}
+          </div>
+          {showScrollDown && <button type="button" className="secondary scroll-down"
+            aria-label="Scroll to latest message" title="Scroll to latest message"
+            onClick={() => feed.current?.scrollTo({ top: feed.current.scrollHeight, behavior: 'smooth' })}>
+            <span aria-hidden="true">↓</span>
+          </button>}
         </div>
         <div className="controls">
           {status && <p role="status" className="notice">{status}</p>}
@@ -303,7 +305,6 @@ function App() {
               disabled={phase === 'Connecting'} onClick={() => {
                 if (phase === 'Voice off') { void toggleVoice(); return; }
                 if (!voice.current) return;
-                if (!muted) queued.current = [];
                 voice.current.setMuted(!muted);
                 setMuted(!muted);
               }}>
@@ -317,7 +318,10 @@ function App() {
       </section>
       {drawer && <aside><h2>Observability</h2><label>Turn<select value={shown?.id ?? ''} onChange={event => setSelected(event.target.value)}>{!turns.length && <option value="">No turns yet</option>}{turns.map(turn => <option key={turn.id} value={turn.id}>{turn.message.slice(0, 48)}</option>)}</select></label>
         <label>Simulate next turn<select value={simulation} onChange={event => setSimulation(event.target.value)}><option value="">None</option><option value="tool">Tool failure</option><option value="timeout">Provider timeout</option><option value="rate">Rate limit</option></select></label>
-        <p className="muted">Estimated API cost · $0 within free quota</p>
+        <p><strong>Estimated API cost</strong> · {recordedCosts.length
+          ? `$${estimatedCost.toFixed(6)} USD${recordedCosts.length < usageTraces.length ? ' (partial)' : ''}`
+          : 'No priced usage recorded'}</p>
+        <p className="muted">Standard list prices for reported planner, verifier, and embedding tokens. Excludes live transcription, hosting, and free quota or discounts.</p>
         {shown?.traces.map((trace, index) => <details key={index} open={trace.stage === 'retrieval' || trace.event === 'timing'}>
           <summary>{trace.stage ?? (trace.name ? `${labels[trace.name]} · ${trace.status}` : String(trace.service ?? trace.event))}{trace.elapsedMs !== undefined ? ` · ${trace.elapsedMs} ms` : ''}</summary>
           <pre>{JSON.stringify(trace, null, 2)}</pre>

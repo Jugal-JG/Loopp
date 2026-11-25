@@ -1,7 +1,7 @@
 import pg from 'pg';
 import { randomUUID } from 'node:crypto';
 import { POLICY_VERSION, publicPlanDocuments, type Match } from './policies.js';
-import { embedding, ServiceError } from './provider.js';
+import { embedding, ServiceError, type UsageReporter } from './provider.js';
 import type { Pending, Profile, Reply } from './agent.js';
 
 let pool: pg.Pool | undefined;
@@ -10,8 +10,8 @@ export function db() {
   return pool ??= new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 4, connectionTimeoutMillis: 4500, query_timeout: 6000, statement_timeout: 5000, idleTimeoutMillis: 10000 });
 }
 
-export async function searchPolicy(query: string, tier: string, publicOnly = false): Promise<Match[]> {
-  return searchByVector(await embedding(query), tier, publicOnly);
+export async function searchPolicy(query: string, tier: string, publicOnly = false, onUsage?: UsageReporter): Promise<Match[]> {
+  return searchByVector(await embedding(query, undefined, onUsage), tier, publicOnly);
 }
 
 export async function searchByVector(vector: number[], tier: string, publicOnly = false): Promise<Match[]> {

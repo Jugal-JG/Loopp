@@ -27,9 +27,10 @@ test('local HTTP, SSE, pgvector ranking, session reload, recovery, tickets and e
   process.env.DEMO_PASSCODE = 'test-passcode';
   process.env.ADMIN_EMAIL = 'admin@loopp.example';
   process.env.ADMIN_PASSWORD = 'test-admin-passcode';
+  let speechUnavailable = false;
   const api = createServer(createHandler({
     decide: async context => {
-      if (context.message === 'Simulate planner capacity') throw new ServiceError('upstream_busy', 503, 'gemini-3.1-flash-lite');
+      if (context.message === 'Simulate planner capacity') throw new ServiceError('upstream_busy', 503, 'voxtral-small-2507');
       const state = context as { message: string; allowed: string[]; matches?: typeof chunks };
       if (state.allowed[0] === 'verifyAccount') return { action: 'verifyAccount' };
       if (!state.matches) return { action: 'searchPolicy' };
@@ -39,7 +40,10 @@ test('local HTTP, SSE, pgvector ranking, session reload, recovery, tickets and e
     verifyEvidence: async () => true,
     searchPolicy: (query, tier) => searchByVector(query.includes('refund') ? refundVector : query.includes('receipt') ? receiptVector : axis(767), tier),
     voiceToken: async () => 'fixture-token',
-    speech: async (_text, onAudio) => { onAudio('AAAAAA==', 'audio/l16'); },
+    speech: async (_text, onAudio) => {
+      if (speechUnavailable) throw new Error('Pocket TTS offline');
+      onAudio('AAAAAA==', 'audio/pcm;rate=24000');
+    },
   }, { localOrigin: 'http://localhost:5173' }));
   api.listen(0, '127.0.0.1');
   await once(api, 'listening');
@@ -101,18 +105,16 @@ test('local HTTP, SSE, pgvector ranking, session reload, recovery, tickets and e
     }
     assert.equal((await turn('Please refund my last charge')).reply.kind, 'confirmation');
     const id = randomUUID();
-    process.env.TTS_OUTPUT = 'browser';
     const confirmed = await turn('confirm refund', 'voice', id);
     assert.equal(confirmed.reply.kind, 'refunded');
-    assert.ok(confirmed.events.includes('browserAudio'));
-    assert.ok(confirmed.events.indexOf('browserAudio') < confirmed.events.indexOf('reply'));
-    assert.ok(!confirmed.events.includes('audio'));
-    process.env.TTS_OUTPUT = 'auto';
-    delete process.env.GROQ_API_KEY;
-    const replay = await turn('confirm refund', 'voice', id);
-    assert.deepEqual(replay.reply, confirmed.reply);
-    assert.ok(replay.events.includes('groq failed'));
-    assert.ok(replay.events.indexOf('audio') > replay.events.indexOf('groq failed'));
+    assert.ok(confirmed.events.includes('audio'));
+    assert.ok(!confirmed.events.includes('browserAudio'));
+    speechUnavailable = true;
+    const offline = await turn('confirm refund', 'voice', id);
+    assert.deepEqual(offline.reply, confirmed.reply);
+    assert.ok(offline.events.includes('voiceError'));
+    assert.ok(!offline.events.includes('audio'));
+    assert.ok(!offline.events.includes('browserAudio'));
     assert.equal((await db().query('SELECT count(*)::int AS count FROM refunds')).rows[0].count, 1);
     const retry = randomUUID();
     assert.equal((await turn('Where is my receipt?', 'chat', retry, 'timeout')).reply.kind, 'error');
@@ -148,7 +150,7 @@ test('local HTTP, SSE, pgvector ranking, session reload, recovery, tickets and e
     assert.deepEqual(afterDelete.tickets, []);
     assert.equal((await fetchPost('reply-ticket', { ...answer, id: randomUUID() }, adminCookie)).status, 404);
     assert.match((await turn('Where is my receipt?', 'chat', randomUUID(), 'rate')).reply.text, /rate limited/);
-    assert.match((await turn('Simulate planner capacity')).reply.text, /gemini-3\.1-flash-lite.*HTTP 503/);
+    assert.match((await turn('Simulate planner capacity')).reply.text, /voxtral-small-2507.*HTTP 503/);
     const rejected = await fetchPost('turn', { id: randomUUID(), message: 'Where is my receipt?', mode: 'chat', profile: 'pro' }, cookie);
     assert.equal(rejected.status, 429);
     await db().query('UPDATE demo_sessions SET pending=$1', [{ id: randomUUID(), profile: 'pro', policy: PRO_REFUND_POLICY }]);

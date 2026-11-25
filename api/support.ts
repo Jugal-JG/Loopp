@@ -1,12 +1,12 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { db, issueRefund, searchPolicy, takeBudget, type Turn } from '../src/store.js';
-import { decide, isRateLimit, ServiceError, speech, voiceToken, textModel, verifyEvidence } from '../src/provider.js';
+import { decide, isRateLimit, ServiceError, voiceToken, textModel, verifyEvidence, type UsageReporter } from '../src/provider.js';
 import { accounts, runSupportTurn, type Pending, type Profile, type Reply } from '../src/agent.js';
 import { adminEmail, cookie, googleEnabled, googleFinish, googleProfile, googleStart, isAdmin, readCookie, secretMatches } from '../src/identity.js';
 import { deliverEmail, emailConfigured } from '../src/notifications.js';
-import { orpheusSpeech } from '../src/orpheus.js';
-import { playSpeechWithFallback } from '../src/speech-output.js';
+import { pocketSpeech } from '../src/pocket-tts.js';
+import { estimateApiCost } from '../src/api-cost.js';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const errors: Record<string, string> = {
@@ -16,8 +16,12 @@ const errors: Record<string, string> = {
   turn_busy: 'Another turn is still running. Wait for it to finish.',
   database_not_configured: 'Connect Neon and seed the policy database to start.',
   wrong_origin: 'Open the Loopp app at the URL printed by Vite and try again.',
-  groq_speech_failed: 'Orpheus could not generate the audio reply.',
   gemini_not_configured: 'Set GEMINI_API_KEY on the server to start.',
+  mistral_model_quota_unavailable: 'The configured Mistral account has no request quota for this model.',
+  mistral_rate_limited: 'Mistral’s request limit was reached. Wait a minute and retry.',
+  mistral_not_configured: 'Set MISTRAL_API_KEY on the server to generate support replies.',
+  mistral_access_denied: 'Mistral denied access. Check the server API key and its permissions.',
+  mistral_request_failed: 'Mistral could not process the support request.',
   gemini_access_denied: 'Gemini denied access. Check the server API key and its permissions.',
   gemini_resource_unavailable: 'The configured Gemini model or endpoint is unavailable.',
   voice_token_rejected: 'Gemini rejected the request to start a voice session.',
@@ -26,7 +30,7 @@ const errors: Record<string, string> = {
 
 function failureMessage(failure: ServiceError) {
   if (failure.code === 'upstream_busy') {
-    const label = failure.model ? `Gemini (${failure.model})` : 'Gemini';
+    const label = failure.model ?? 'The upstream service';
     return `${label} returned HTTP ${failure.status} Service Unavailable. The service is temporarily at capacity. Retry in a moment.`;
   }
   return errors[failure.code];
@@ -81,7 +85,7 @@ async function createSession(email: string | null, kind: string, profile: Profil
   return id;
 }
 
-const providers = { decide, verifyEvidence, searchPolicy, speech, voiceToken };
+const providers = { decide, verifyEvidence, searchPolicy, speech: pocketSpeech, voiceToken };
 
 async function handle(req: IncomingMessage, res: ServerResponse, services: typeof providers, localOrigin?: string) {
   const requestId = randomUUID();
@@ -232,7 +236,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, services: typeo
       const existing = (await db().query<Turn>('SELECT message,mode,profile,reply,traces FROM support_turns WHERE session_id=$1 AND id=$2', [session.id, id])).rows[0];
       if (existing.message !== message || existing.mode !== mode || existing.profile !== profile) throw new ServiceError('turn_mismatch', 409);
       const history = (await db().query<Pick<Turn, 'message' | 'reply'>>(`SELECT message,reply FROM support_turns
-        WHERE session_id=$1 AND profile=$2 AND id<>$3 AND reply IS NOT NULL ORDER BY created_at DESC LIMIT 4`, [session.id, profile, id])).rows.reverse()
+        WHERE session_id=$1 AND profile=$2 AND id<>$3 AND reply->>'kind' <> 'error'
+        ORDER BY created_at DESC, id DESC LIMIT 4`, [session.id, profile, id])).rows.reverse()
         .flatMap(row => [{ role: 'user', text: row.message }, { role: 'assistant', text: row.reply!.text }]);
       res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no' });
       res.flushHeaders();
@@ -258,7 +263,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, services: typeo
         const deadline = () => {
           if (performance.now() - started > 35_000) throw new ServiceError('upstream_timeout', 504);
         };
-        const usageTrace = (service: string) => (usage: unknown, model?: string) => emit('usage', { service, model, usage: usage ?? null, estimatedCostUsd: process.env.GEMINI_BILLING === 'paid' ? null : 0 });
+        const usageTrace = (service: string): UsageReporter => (usage, model) => {
+          emit('usage', { service, model, usage: usage ?? null, estimatedCostUsd: estimateApiCost(model, usage) });
+        };
         reply = existing.reply?.kind !== 'error' && existing.reply ? existing.reply : recovered
           ? { kind: 'refunded', text: `Your mock refund was issued. Reference ${recovered}.` }
           : confirm && !pending ? { kind: 'clarify', text: 'There is no refund awaiting confirmation. Ask for a refund first.' }
@@ -270,7 +277,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, services: typeo
               if (body.simulate === 'timeout') throw new ServiceError('upstream_timeout', 504);
               if (body.simulate === 'rate') throw new ServiceError('rate_limited', 429);
               deadline();
-              return services.searchPolicy(query, tier, publicOnly);
+              return services.searchPolicy(query, tier, publicOnly, usageTrace('policy embeddings'));
             },
             prepare: async (activeProfile, policy) => {
               await db().query('UPDATE demo_sessions SET pending=$2 WHERE id=$1', [session.id, { id: randomUUID(), profile: activeProfile, policy }]);
@@ -304,67 +311,39 @@ async function handle(req: IncomingMessage, res: ServerResponse, services: typeo
       function logTiming(stage: string, extra: Record<string, unknown> = {}) {
         console.info(JSON.stringify({ requestId, mode, stage, elapsedMs: Math.round(performance.now() - requestStarted), ...extra }));
       }
-      let voiceCanceled = false;
-      function emitVoice(event: string, data: Record<string, unknown>) {
-        if (voiceCanceled || res.destroyed) return;
-        emit(event, data);
-      }
+      const voiceAbort = new AbortController();
+      const cancelVoice = () => voiceAbort.abort();
       async function streamVoice() {
+        const provider = 'pocket-tts';
+        const started = performance.now();
         let audioReady = false;
-        let activeProvider = '';
-        let attemptStarted = performance.now();
-        const voiceOutput = process.env.TTS_OUTPUT || 'auto';
+        const signal = AbortSignal.any([voiceAbort.signal, AbortSignal.timeout(30_000)]);
+        logTiming('speech requested', { provider });
+        emit('trace', { stage: 'voice attempt', provider });
         try {
-          const gemini = { name: 'gemini', firstAudioMs: voiceOutput === 'auto' ? 1800 : 4000, speak: (onAudio: (data: string, mime: string) => boolean, signal: AbortSignal) => {
-            activeProvider = 'gemini';
-            attemptStarted = performance.now();
-            logTiming('speech requested', { provider: activeProvider });
-            emitVoice('trace', { stage: 'voice attempt', provider: activeProvider });
-            return services.speech(reply.text, onAudio,
-              usage => emitVoice('usage', { service: 'tts', usage: usage ?? null, estimatedCostUsd: 0 }), signal);
-          } };
-          const groq = { name: 'groq', firstAudioMs: voiceOutput === 'auto' ? 2500 : 3500, speak: (onAudio: (data: string, mime: string) => boolean, signal: AbortSignal) => {
-            activeProvider = 'groq';
-            attemptStarted = performance.now();
-            logTiming('speech requested', { provider: activeProvider });
-            emitVoice('trace', { stage: 'voice attempt', provider: activeProvider });
-            return orpheusSpeech(reply.text, onAudio, signal);
-          } };
-          const attempts = voiceOutput === 'browser' ? [] : voiceOutput === 'groq' ? [groq]
-            : voiceOutput === 'gemini' ? [gemini] : [groq, gemini];
-          await playSpeechWithFallback(attempts, (data, mime) => {
-            if (res.destroyed) return false;
+          await services.speech(reply.text, (data, mime) => {
+            if (res.destroyed || signal.aborted) return false;
             if (!audioReady) {
-              const providerMs = Math.round(performance.now() - attemptStarted);
-              logTiming('first audio ready', { provider: activeProvider, providerMs });
-              emitVoice('trace', { stage: 'voice first audio', provider: activeProvider, providerMs });
+              const providerMs = Math.round(performance.now() - started);
+              logTiming('first audio ready', { provider, providerMs });
+              emit('trace', { stage: 'voice first audio', provider, providerMs });
               audioReady = true;
             }
-            emitVoice('audio', { data, mime });
+            emit('audio', { data, mime });
             return true;
-          }, () => {
-            logTiming('browser speech selected');
-            emitVoice('trace', { stage: 'voice playback', provider: 'browser' });
-            emitVoice('browserAudio', { text: reply.text });
-          }, (provider, error) => {
-            const code = classify(error).code;
-            logTiming('speech failed', { provider, code, providerMs: Math.round(performance.now() - attemptStarted) });
-            const upstreamStatus = (error as { status?: number } | null)?.status;
-            emitVoice('trace', { stage: 'voice failure', provider, code, upstreamStatus,
-              providerMs: Math.round(performance.now() - attemptStarted) });
-          }, () => res.destroyed || voiceCanceled);
-        } catch (error) {
-          const failure = classify(error);
-          emitVoice('trace', { stage: 'voice failure', code: failure.code });
-          const message = failure.code === 'groq_not_configured' ? 'Orpheus is waiting for a Groq API key.'
-            : failure.code === 'rate_limited'
-            ? 'The voice provider is rate limiting audio replies. Text replies are still available.'
-            : failureMessage(failure) ?? 'Speech synthesis did not complete.';
-          emitVoice('voiceError', { code: failure.code, message });
+          }, signal);
+        } catch {
+          if (res.destroyed || voiceAbort.signal.aborted) return;
+          const code = signal.aborted ? 'upstream_timeout' : 'pocket_speech_failed';
+          const providerMs = Math.round(performance.now() - started);
+          logTiming('speech failed', { provider, code, providerMs });
+          emit('trace', { stage: 'voice failure', provider, code, providerMs });
+          emit('voiceError', { code, message: 'Pocket TTS could not complete the audio reply. Your answer is available in chat.' });
         }
       }
       const shouldSpeak = mode === 'voice' && reply.kind !== 'error' && !res.destroyed;
       logTiming('reply ready', { kind: reply.kind });
+      if (shouldSpeak) res.once('close', cancelVoice);
       const voiceWork = shouldSpeak ? streamVoice() : undefined;
       try {
         await db().query('UPDATE support_turns SET reply=$3,traces=$4 WHERE session_id=$1 AND id=$2', [session.id, id, reply, JSON.stringify(traces)]);
@@ -381,7 +360,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, services: typeo
           await db().query('UPDATE support_turns SET traces=$3 WHERE session_id=$1 AND id=$2', [session.id, id, JSON.stringify(traces)]);
         }
       } finally {
-        voiceCanceled = true;
+        cancelVoice();
+        res.off('close', cancelVoice);
       }
       await notification;
       res.end();

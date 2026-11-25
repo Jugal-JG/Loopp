@@ -27,7 +27,7 @@ test('voice playback questions are answered as app help without an escalation', 
   assert.deepEqual(flow.calls, []);
 });
 
-test('Gemini handles greetings and capabilities and declines off-topic requests without escalation', async () => {
+test('The planner handles greetings and capabilities and declines off-topic requests without escalation', async () => {
   const flow = fixture([
     { action: 'greet', greeting: 'Hello! Good to hear from you.' },
     { action: 'declineOffTopic' },
@@ -153,4 +153,14 @@ test('chunking keeps short conditions and exclusions together and overlaps a lon
   assert.equal(chunksFromLong.length, 2);
   assert.ok(chunksFromLong[0].text.endsWith('w259'));
   assert.ok(chunksFromLong[1].text.startsWith('w235'));
+});
+
+test('a short follow-up explains the scope of the previous reply', async () => {
+  const flow = fixture([]);
+  const reply = await flow.run({ message: 'Why?', history: [
+    { role: 'user', text: 'What is RAG?' },
+    { role: 'assistant', text: 'I can only answer Loopp help desk questions.' },
+  ] });
+  assert.equal(reply.kind, 'answer');
+  assert.match(reply.text, /set up for Loopp support/);
 });

@@ -43,6 +43,8 @@ export function evidence(matches: Match[], threshold: number, sourceId?: string,
     && match.text.includes(quote.trim()) ? match : undefined;
 }
 
+const offTopicReply = 'I can only answer Loopp help desk questions.';
+
 export async function runSupportTurn(input: AgentInput, tools: AgentTools, emit: Trace): Promise<Reply> {
   const question = input.message.trim();
   if (/^(?:(?:hi|hello|hey)[,!?. ]+)?(?:how can you help(?: me)?|what can you (?:do|help(?: me)? with)|what do you do)[?.! ]*$/i.test(question)) {
@@ -52,6 +54,11 @@ export async function runSupportTurn(input: AgentInput, tools: AgentTools, emit:
   if (/^(?:why (?:are you (?:not|aren.t you)|aren.t you|didn.t you|did you not) (?:speak|speaking|read|say)|(?:why (?:is there|was there) )?no (?:voice|audio|sound)|(?:i )?can.t hear you|why (?:isn.t|is not) (?:the |your )?(?:voice|audio|sound) working)/i.test(question)) {
     emit('trace', { stage: 'app help', topic: 'voice playback' });
     return { kind: 'answer', text: 'Typed messages get a text reply. Voice turns normally play audio. If a voice reply is silent, check your browser volume and output device. An audio error will appear above the composer if synthesis fails.' };
+  }
+  const priorReply = input.history.findLast(item => item.role === 'assistant')?.text;
+  if (/^why(?: is that)?[?.! ]*$/i.test(question) && priorReply === offTopicReply) {
+    emit('trace', { stage: 'app help', topic: 'support scope' });
+    return { kind: 'answer', text: 'This assistant is set up for Loopp support, so it can help with things like billing, signing in, and managing your workspace.' };
   }
   const mentionedTier = question.match(/\b(basic|pro)\s+(?:users?|customers?|plan|members?|accounts?)\b/i)?.[1]
     ?? question.match(/^(?:what|how) about (basic|pro)[?.!]*$/i)?.[1];
@@ -103,8 +110,8 @@ export async function runSupportTurn(input: AgentInput, tools: AgentTools, emit:
         break;
       case 'searchPolicy': {
         const tier = account!.tier;
-        const followUp = /^(?:and\b|what about\b|how about\b|does (?:that|it)\b|is (?:that|it)\b)/i.test(input.message);
-        const original = followUp ? `${input.history.filter(item => item.role === 'user').at(-1)?.text ?? ''} ${input.message}`.trim() : input.message;
+        const followUp = !!priorQuestion && /^(?:why[?.! ]*$|how[?.! ]*$|and\b|what about\b|how about\b|does (?:that|it)\b|is (?:that|it)\b)/i.test(input.message);
+        const original = followUp ? `${priorQuestion} ${input.message}`.trim() : input.message;
         // Rewriting a standalone question can accidentally drop identifying details.
         const query = (followUp && result.query?.trim().slice(0, 300)) || original;
         const subqueries = (result.subqueries ?? []).slice(0, 2).filter(item => typeof item.query === 'string' && item.query.trim() &&
@@ -158,7 +165,7 @@ export async function runSupportTurn(input: AgentInput, tools: AgentTools, emit:
       case 'greet':
         return { kind: 'answer', text: result.greeting?.trim().slice(0, 200) || 'Hello!' };
       case 'declineOffTopic':
-        return { kind: 'answer', text: 'I can only answer Loopp help desk questions.' };
+        return { kind: 'answer', text: offTopicReply };
       default:
         return handoff('unsupported_or_requested');
     }

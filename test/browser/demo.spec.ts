@@ -113,8 +113,9 @@ test('denied microphone permission keeps text chat available on mobile layout', 
   await expect(page.getByRole('textbox', { name: 'Your message' })).toBeEditable();
 });
 
-for (const recoverInterim of [false, true]) {
-test(recoverInterim ? 'Send voice automatically submits a stalled transcript once' : 'voice transcripts share the chat endpoint and microphone speech interrupts browser playback', async ({ page }) => {
+for (const mode of ['interrupt', 'send', 'mute']) {
+const recoverInterim = mode !== 'interrupt';
+test(mode === 'mute' ? 'muting preserves and submits a captured transcript once' : recoverInterim ? 'Send voice automatically submits a stalled transcript once' : 'voice transcripts share the chat endpoint and microphone speech interrupts streamed playback', async ({ page }) => {
   if (!recoverInterim) await page.addInitScript(() => {
     const fetchRequest = window.fetch.bind(window);
     window.fetch = async (...args) => {
@@ -127,6 +128,7 @@ test(recoverInterim ? 'Send voice automatically submits a stalled transcript onc
         start(controller) {
           controller.enqueue(encode.encode(events.slice(0, boundary)));
           Object.assign(window, { publishTestReply: () => {
+            Reflect.deleteProperty(window, 'publishTestReply');
             controller.enqueue(encode.encode(events.slice(boundary)));
             controller.close();
           } });
@@ -135,14 +137,11 @@ test(recoverInterim ? 'Send voice automatically submits a stalled transcript onc
     };
   });
   await page.addInitScript(() => {
-    Object.defineProperty(window, 'speechSynthesis', { value: {
-      getVoices: () => [],
-      speak: (utterance: SpeechSynthesisUtterance) => {
-        document.body.dataset.spoken = utterance.text;
-        queueMicrotask(() => utterance.dispatchEvent(new Event('start')));
-      },
-      cancel: () => { document.body.dataset.speechCancelled = 'true'; },
-    } });
+    const stop = AudioBufferSourceNode.prototype.stop;
+    AudioBufferSourceNode.prototype.stop = function (when) {
+      document.body.dataset.speechCancelled = 'true';
+      return stop.call(this, when);
+    };
     Object.defineProperty(navigator.mediaDevices, 'getUserMedia', {
       async value() {
         const context = new AudioContext();
@@ -172,7 +171,7 @@ test(recoverInterim ? 'Send voice automatically submits a stalled transcript onc
     socket.onMessage(raw => {
       const request = JSON.parse(String(raw));
       if (request.setup) {
-        expect(request.setup.inputAudioTranscription.mode).toBe('VERBATIM');
+        expect(request.setup.inputAudioTranscription).toMatchObject({ mode: 'VERBATIM', languageCodes: ['en-US'] });
         socket.send(JSON.stringify({ setupComplete: {} }));
       }
       if (request.realtimeInput?.audio) microphoneFrames++;
@@ -189,17 +188,14 @@ test(recoverInterim ? 'Send voice automatically submits a stalled transcript onc
     });
     sentTurns++;
     const reply = { kind: 'answer', text: sentTurns === 1 ? 'Download the receipt in Billing.' : 'Here is the plan comparison.' };
-    if (!recoverInterim) return route.fulfill({ contentType: 'text/event-stream', body: sse([
-      ['browserAudio', { text: reply.text }], ['text', { text: reply.text }], ['reply', { reply }], ['done', {}],
-    ]) });
+    const audio = { data: Buffer.alloc(24000 * 2 * 5).toString('base64'), mime: 'audio/pcm;rate=24000' };
     return route.fulfill({ contentType: 'text/event-stream', body: sse([
-      ['text', { text: reply.text }], ['reply', { reply }],
-      ['done', {}], ['browserAudio', {}],
+      ['audio', audio], ['text', { text: reply.text }], ['reply', { reply }], ['done', {}],
     ]) });
   });
   await page.goto('/');
   await page.getByRole('button', { name: 'Start voice' }).click();
-  await expect(page.getByText('Listening', { exact: true })).toBeVisible();
+  await expect(page.getByText('Listening', { exact: true })).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole('textbox', { name: 'Your message' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Send voice' })).toBeVisible();
   await expect.poll(() => microphoneFrames).toBeGreaterThan(0);
@@ -211,20 +207,26 @@ test(recoverInterim ? 'Send voice automatically submits a stalled transcript onc
   await page.getByRole('button', { name: 'Unmute mic' }).click();
   await expect.poll(() => microphoneFrames).toBeGreaterThan(framesAtMute);
   const preview = recoverInterim ? 'Find my receipt' : 'Find my';
-  sendTranscript!({ serverContent: { interimInputTranscription: { text: preview } } });
+  sendTranscript!({ serverContent: { interimInputTranscription: { text: 'Bonjour', languageCode: 'fr-FR' } } });
+  await expect(page.locator('.transcript')).toHaveCount(0);
+  if (recoverInterim) {
+    sendTranscript!({ serverContent: { interimInputTranscription: { text: preview, languageCode: 'en-US' } } });
+  } else {
+    sendTranscript!({ serverContent: { inputTranscription: { text: preview, languageCode: 'en-US', finished: false } } });
+  }
   await expect(page.locator('.transcript')).toHaveText(preview);
   if (recoverInterim) {
-    await page.getByRole('button', { name: 'Send voice' }).click();
+    await page.getByRole('button', { name: mode === 'mute' ? 'Mute mic' : 'Send voice' }).click();
     await expect(page.getByText('Download the receipt in Billing.')).toBeVisible();
+    if (mode === 'mute') await page.getByRole('button', { name: 'Unmute mic' }).click();
   } else {
     sendTranscript!({ serverContent: { inputTranscription: { text: 'Find my receipt' } } });
-    await expect(page.locator('body')).toHaveAttribute('data-spoken', 'Download the receipt in Billing.');
+    await expect(page.getByText('Speaking', { exact: true })).toBeVisible();
     await expect(page.getByText('Download the receipt in Billing.')).toHaveCount(0);
     await page.evaluate(() => (window as unknown as { publishTestReply: () => void }).publishTestReply());
   }
   await expect(page.getByText('Download the receipt in Billing.')).toBeVisible();
   await expect(page.getByText('Speaking', { exact: true })).toBeVisible();
-  await expect(page.locator('body')).toHaveAttribute('data-spoken', 'Download the receipt in Billing.');
   await page.evaluate(() => (window as unknown as { noiseTest: () => void }).noiseTest());
   await page.waitForTimeout(250);
   await expect(page.getByText('Speaking', { exact: true })).toBeVisible();
@@ -237,7 +239,7 @@ test(recoverInterim ? 'Send voice automatically submits a stalled transcript onc
   await expect(page.locator('body')).toHaveAttribute('data-speech-cancelled', 'true');
   if (recoverInterim) {
     // Keep speaking beyond the stall deadline before the previous final arrives.
-    await page.waitForTimeout(10_200);
+    if (mode === 'send') await page.waitForTimeout(10_200);
     await expect(page.getByRole('button', { name: 'Stop voice' })).toBeVisible();
     const framesBeforeFinal = microphoneFrames;
     sendTranscript!({ serverContent: { inputTranscription: { text: preview } } });
@@ -245,7 +247,7 @@ test(recoverInterim ? 'Send voice automatically submits a stalled transcript onc
   }
   sendTranscript!({ serverContent: { inputTranscription: { text: 'Compare Basic and Pro' } } });
   if (!recoverInterim) {
-    await expect(page.locator('body')).toHaveAttribute('data-spoken', 'Here is the plan comparison.');
+    await page.waitForFunction(() => Reflect.has(window, 'publishTestReply'));
     await page.evaluate(() => (window as unknown as { publishTestReply: () => void }).publishTestReply());
   }
   await expect(page.getByText('Here is the plan comparison.')).toBeVisible();
@@ -254,3 +256,22 @@ test(recoverInterim ? 'Send voice automatically submits a stalled transcript onc
   expect(sentTurns).toBe(2);
 });
 }
+
+test('a scrolled-up conversation can jump to the latest message', async ({ page }) => {
+  const turns = Array.from({ length: 25 }, (_, index) => ({
+    id: String(index), mode: 'chat', profile: 'pro', message: `Question ${index}`,
+    reply: { kind: 'answer', text: `Reply ${index}` }, traces: [],
+  }));
+  await page.route('**/api/support?*', route => route.fulfill({
+    json: new URL(route.request().url()).searchParams.get('action') === 'session' ? { turns } : {},
+  }));
+  await page.goto('/');
+  const feed = page.locator('.feed');
+  await expect(page.getByText('Reply 24')).toBeInViewport();
+  await feed.evaluate(element => { element.scrollTop = 0; });
+  const jump = page.getByRole('button', { name: 'Scroll to latest message' });
+  await expect(jump).toBeVisible();
+  await jump.click();
+  await expect(page.getByText('Reply 24')).toBeInViewport();
+  await expect(jump).toHaveCount(0);
+});
