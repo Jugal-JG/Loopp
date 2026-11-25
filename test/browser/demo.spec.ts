@@ -134,7 +134,13 @@ test(recoverInterim ? 'Send voice automatically submits a stalled transcript onc
         const destination = context.createMediaStreamDestination();
         oscillator.connect(gain).connect(destination);
         oscillator.start();
-        Object.assign(window, { speakTest: () => { gain.gain.value = 0.3; } });
+        Object.assign(window, {
+          speakTest: () => { gain.gain.value = 0.3; },
+          noiseTest: () => {
+            gain.gain.setValueAtTime(0.3, context.currentTime);
+            gain.gain.setValueAtTime(0, context.currentTime + 0.06);
+          },
+        });
         return destination.stream;
       },
     });
@@ -194,6 +200,10 @@ test(recoverInterim ? 'Send voice automatically submits a stalled transcript onc
   await expect(page.getByText('Download the receipt in Billing.')).toBeVisible();
   await expect(page.getByText('Speaking', { exact: true })).toBeVisible();
   await expect(page.locator('body')).toHaveAttribute('data-spoken', 'Download the receipt in Billing.');
+  await page.evaluate(() => (window as unknown as { noiseTest: () => void }).noiseTest());
+  await page.waitForTimeout(250);
+  await expect(page.getByText('Speaking', { exact: true })).toBeVisible();
+  await expect(page.locator('body')).not.toHaveAttribute('data-speech-cancelled', 'true');
   await page.getByRole('button', { name: 'Mute mic' }).click();
   await page.evaluate(() => (window as unknown as { speakTest: () => void }).speakTest());
   await expect(page.getByText('Speaking · Mic muted', { exact: true })).toBeVisible();

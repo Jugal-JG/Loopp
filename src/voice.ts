@@ -15,6 +15,8 @@ const interimFallbackMs = 650;
 const transcriptStallMs = 10_000;
 const speechOnsetLevel = 0.025;
 const speechContinuationLevel = 0.015;
+const playbackSpeechLevel = 0.035;
+const playbackSpeechFrames = 6; // The worklet emits about 20 ms per frame.
 
 function encode(bytes: Uint8Array) {
   return btoa(String.fromCharCode(...bytes));
@@ -160,6 +162,7 @@ export async function startVoice(callbacks: VoiceCallbacks, signal: AbortSignal)
     worklet.connect(silent).connect(context.destination);
     mic.connect(worklet);
     let audioFrames: Int16Array[] = [];
+    let playbackPreRoll: Int16Array[] = [];
     let buffered = 0;
     function submitTranscript(text: string, speechEnd: number, speechEpoch: number) {
       callbacks.partial('');
@@ -220,8 +223,22 @@ export async function startVoice(callbacks: VoiceCallbacks, signal: AbortSignal)
       if (closed || muted || !session) return;
       const pcm = event.data as Int16Array;
       level = Math.sqrt(pcm.reduce((sum, sample) => sum + (sample / 32768) ** 2, 0) / pcm.length);
+      const playing = Boolean(fallback || players.size);
       const continuing = lastLoud && performance.now() - lastLoud < silenceMs;
-      loudFrames = level > (continuing ? speechContinuationLevel : speechOnsetLevel) ? loudFrames + 1 : 0;
+      const threshold = playing ? playbackSpeechLevel : continuing ? speechContinuationLevel : speechOnsetLevel;
+      loudFrames = level > threshold ? loudFrames + 1 : 0;
+      if (playing) {
+        // Keep the start of an interruption without streaming isolated sounds.
+        if (!loudFrames) playbackPreRoll = [];
+        else playbackPreRoll.push(pcm);
+        if (loudFrames < playbackSpeechFrames) return;
+        for (const frame of playbackPreRoll.slice(0, -1)) {
+          audioFrames.push(frame);
+          buffered += frame.length;
+        }
+        loudFrames = 2;
+      }
+      playbackPreRoll = [];
       if (loudFrames >= 2) {
         lastLoud = performance.now();
         if (loudFrames === 2) {
@@ -253,6 +270,7 @@ export async function startVoice(callbacks: VoiceCallbacks, signal: AbortSignal)
         media.getAudioTracks().forEach(track => { track.enabled = !value; });
         level = loudFrames = lastLoud = buffered = 0;
         audioFrames = [];
+        playbackPreRoll = [];
         clearTimeout(silenceTimer);
         interim = '';
         callbacks.partial('');

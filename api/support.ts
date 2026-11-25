@@ -291,13 +291,13 @@ async function handle(req: IncomingMessage, res: ServerResponse, services: typeo
       } finally {
         clearInterval(keepalive);
       }
+      await db().query('UPDATE support_turns SET reply=$3,traces=$4 WHERE session_id=$1 AND id=$2', [session.id, id, reply, JSON.stringify(traces)]);
+      const state = (await db().query('SELECT pending FROM demo_sessions WHERE id=$1', [session.id])).rows[0];
+      await release();
       // Only split where sentence punctuation is followed by a space; preserve decimal amounts.
       const sentences = reply.text.split(/(?<=[.!?])\s+/);
       for (const [index, sentence] of sentences.entries()) emit('text', { text: `${index ? ' ' : ''}${sentence}` });
-      await db().query('UPDATE support_turns SET reply=$3,traces=$4 WHERE session_id=$1 AND id=$2', [session.id, id, reply, JSON.stringify(traces)]);
       emit('reply', { reply });
-      const state = (await db().query('SELECT pending FROM demo_sessions WHERE id=$1', [session.id])).rows[0];
-      await release();
       emit('done', { pending: state.pending?.profile });
       if (mode === 'voice' && !res.destroyed && reply.kind !== 'error') {
         const voiceOutput = process.env.TTS_OUTPUT || 'auto';
