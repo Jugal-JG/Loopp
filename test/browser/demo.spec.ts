@@ -298,3 +298,66 @@ test('hosted voice startup blocks the workspace until ready and can be retried',
   await expect(page.getByRole('button', { name: 'Start voice' })).toBeEnabled();
   expect(checks).toBe(2);
 });
+
+test('refund progress preserves the scroll position while reviewing earlier messages', async ({ page }) => {
+  await page.addInitScript(() => {
+    const fetchRequest = window.fetch.bind(window);
+    window.fetch = async (...args) => {
+      const response = await fetchRequest(...args);
+      if (!response.url.includes('action=turn')) return response;
+      const events = (await response.text()).trimEnd().split('\n\n');
+      const encoder = new TextEncoder();
+      const body = new ReadableStream({
+        start(controller) {
+          const next = () => {
+            const event = events.shift();
+            if (!event) return controller.close();
+            controller.enqueue(encoder.encode(event + '\n\n'));
+            if (events.length) window.addEventListener('advance-refund', next, { once: true });
+            else controller.close();
+          };
+          next();
+        },
+      });
+      return new Response(body, { headers: response.headers });
+    };
+  });
+  const turns = Array.from({ length: 20 }, (_, index) => ({
+    id: String(index), mode: 'chat', profile: 'pro', message: `Prior question ${index}`,
+    reply: { kind: 'answer', text: `Prior answer ${index}` }, traces: [],
+  }));
+  const reply = { kind: 'confirmation', text: 'Your charge qualifies. Confirm refund to proceed.' };
+  await page.route('**/api/support?*', route => {
+    const action = new URL(route.request().url()).searchParams.get('action');
+    if (action === 'session') return route.fulfill({ json: { turns } });
+    if (action !== 'turn') return route.fulfill({ json: {} });
+    return route.fulfill({ contentType: 'text/event-stream', body: sse([
+      ['tool', { name: 'verifyAccount', status: 'started' }],
+      ['tool', { name: 'verifyAccount', status: 'completed' }],
+      ['tool', { name: 'searchPolicy', status: 'started' }],
+      ['tool', { name: 'verifyEvidence', status: 'started' }],
+      ['tool', { name: 'prepareRefund', status: 'started' }],
+      ['reply', { reply }], ['done', { pending: 'pro' }],
+    ]) });
+  });
+  await page.goto('/');
+  await page.getByRole('textbox', { name: 'Your message' }).fill('Please refund my last charge.');
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
+  const feed = page.locator('.feed');
+  const advance = () => page.evaluate(() => window.dispatchEvent(new Event('advance-refund')));
+  await expect(page.getByText('Verify account & contract')).toBeInViewport();
+  await advance();
+  await expect(page.locator('.step').first()).toHaveText(/✓/);
+  await feed.evaluate(element => { element.scrollTop = 0; });
+  const jump = page.getByRole('button', { name: 'Scroll to latest message' });
+  await expect(jump).toBeVisible();
+  for (const label of ['Search support policies', 'Check policy evidence', 'Prepare mock refund', reply.text]) {
+    await advance();
+    await expect(page.getByText(label, { exact: false })).toBeAttached();
+    expect(await feed.evaluate(element => element.scrollTop)).toBe(0);
+  }
+  await advance();
+  await expect(page.getByRole('button', { name: 'Confirm refund' })).toBeEnabled();
+  await jump.click();
+  await expect(page.getByText(reply.text)).toBeInViewport();
+});

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { Profile, Reply } from './agent';
 import { readEvents } from './stream';
@@ -50,6 +50,8 @@ function App() {
   const queued = useRef<{ text: string; speechEnd: number; profile: Profile; epoch: number }[]>([]);
   const liveUsage = useRef<unknown>(null);
   const feed = useRef<HTMLDivElement>(null);
+  const feedContent = useRef<HTMLDivElement>(null);
+  const pinnedToLatest = useRef(true);
   const profileRef = useRef(profile);
   profileRef.current = profile;
 
@@ -72,9 +74,20 @@ function App() {
     void load();
     return () => { voiceStart.current?.abort(); voice.current?.close(); };
   }, []);
-  useEffect(() => {
-    if (!showScrollDown && feed.current) feed.current.scrollTop = feed.current.scrollHeight;
-  }, [turns, partial, showScrollDown]);
+  useLayoutEffect(() => {
+    const viewport = feed.current;
+    const content = feedContent.current;
+    if (!viewport || !content) return;
+    const followLatest = () => {
+      const bottom = viewport.scrollHeight - viewport.clientHeight;
+      if (pinnedToLatest.current && bottom - viewport.scrollTop > 1) viewport.scrollTop = bottom;
+    };
+    followLatest();
+    const observer = new ResizeObserver(followLatest);
+    observer.observe(viewport);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [auth, voiceReadiness, showTickets]);
 
   useEffect(() => {
     if (auth !== 'ready' || voiceReadiness !== 'warming') return;
@@ -285,22 +298,26 @@ function App() {
         <div className="feed-wrap">
           <div className="feed" ref={feed} onScroll={event => {
             const { scrollHeight, scrollTop, clientHeight } = event.currentTarget;
-            setShowScrollDown(scrollHeight - scrollTop - clientHeight > 48);
+            const nearBottom = scrollHeight - scrollTop - clientHeight <= 48;
+            pinnedToLatest.current = nearBottom;
+            setShowScrollDown(!nearBottom);
           }}>
-            {!turns.length && <div className="welcome"><span className="logo">L</span><h2>How can we help?</h2><div className="prompts">{prompts.map(prompt => <button key={prompt} className="secondary" onClick={() => void submit(prompt, 'chat', profile)}>{prompt}</button>)}</div></div>}
-            {turns.map(turn => <article key={turn.id} className="turn">
-              <div className="customer"><small>{turn.mode === 'voice' ? 'You · voice' : 'You'} · {turn.profile}</small><p>{turn.message}</p></div>
-              <div className="agent"><small>Loopp Support</small>
-                {turn.traces.filter(trace => trace.event === 'tool' && trace.status === 'started').map((trace, index) => {
-                  const result = turn.traces.findLast(entry => entry.event === 'tool' && entry.name === trace.name && entry.status !== 'started');
-                  return <div className="step" key={index}><span aria-hidden="true">{result?.status === 'completed' ? '✓' : result?.status === 'failed' ? '×' : '◌'}</span> {labels[trace.name!] ?? trace.name}</div>;
-                })}
-                <p aria-live="polite">{turn.reply?.text ?? turn.draft ?? (busy ? 'Working…' : 'This turn was interrupted.')}</p>
-                {turn.reply?.sources?.map(source => <span className="source" key={source}>{source}</span>)}
-                {(!turn.reply || turn.reply.kind === 'error') && !busy && <button className="secondary" onClick={() => void submit(turn.message, turn.mode, turn.profile, turn.id)}>Retry turn</button>}
-              </div>
-            </article>)}
-            {partial && <p className="transcript" aria-live="polite">{partial}</p>}
+            <div ref={feedContent}>
+              {!turns.length && <div className="welcome"><span className="logo">L</span><h2>How can we help?</h2><div className="prompts">{prompts.map(prompt => <button key={prompt} className="secondary" onClick={() => void submit(prompt, 'chat', profile)}>{prompt}</button>)}</div></div>}
+              {turns.map(turn => <article key={turn.id} className="turn">
+                <div className="customer"><small>{turn.mode === 'voice' ? 'You · voice' : 'You'} · {turn.profile}</small><p>{turn.message}</p></div>
+                <div className="agent"><small>Loopp Support</small>
+                  {turn.traces.filter(trace => trace.event === 'tool' && trace.status === 'started').map((trace, index) => {
+                    const result = turn.traces.findLast(entry => entry.event === 'tool' && entry.name === trace.name && entry.status !== 'started');
+                    return <div className="step" key={index}><span aria-hidden="true">{result?.status === 'completed' ? '✓' : result?.status === 'failed' ? '×' : '◌'}</span> {labels[trace.name!] ?? trace.name}</div>;
+                  })}
+                  <p aria-live="polite">{turn.reply?.text ?? turn.draft ?? (busy ? 'Working…' : 'This turn was interrupted.')}</p>
+                  {turn.reply?.sources?.map(source => <span className="source" key={source}>{source}</span>)}
+                  {(!turn.reply || turn.reply.kind === 'error') && !busy && <button className="secondary" onClick={() => void submit(turn.message, turn.mode, turn.profile, turn.id)}>Retry turn</button>}
+                </div>
+              </article>)}
+              {partial && <p className="transcript" aria-live="polite">{partial}</p>}
+            </div>
           </div>
           {showScrollDown && <button type="button" className="secondary scroll-down"
             aria-label="Scroll to latest message" title="Scroll to latest message"

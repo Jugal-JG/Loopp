@@ -34,6 +34,7 @@ export async function startVoice(callbacks: VoiceCallbacks, signal: AbortSignal)
   let session: Awaited<ReturnType<GoogleGenAI['live']['connect']>> | undefined;
   const players = new Set<AudioBufferSourceNode>();
   let playbackCursor = 0;
+  let playbackIdleTimer: ReturnType<typeof setTimeout> | undefined;
   let frame = 0;
   let epoch = 0;
   let closed = false;
@@ -53,7 +54,10 @@ export async function startVoice(callbacks: VoiceCallbacks, signal: AbortSignal)
   function interrupt() {
     epoch++;
     playbackCursor = 0;
-    if (players.size) {
+    const wasSpeaking = players.size > 0 || playbackIdleTimer !== undefined;
+    clearTimeout(playbackIdleTimer);
+    playbackIdleTimer = undefined;
+    if (wasSpeaking) {
       for (const source of players) source.stop();
       players.clear();
       callbacks.phase('Listening');
@@ -293,13 +297,20 @@ export async function startVoice(callbacks: VoiceCallbacks, signal: AbortSignal)
           for (let index = 0; index < channel.length; index++) channel[index] = samples.getInt16(index * 2, true) / 32768;
         } else audio = await context.decodeAudioData(bytes.buffer);
         if (closed || epoch !== expectedEpoch) return false;
+        clearTimeout(playbackIdleTimer);
+        playbackIdleTimer = undefined;
         const source = context.createBufferSource();
         players.add(source);
         source.buffer = audio;
         source.connect(analyser);
         source.onended = () => {
           source.disconnect();
-          if (players.delete(source) && !players.size) callbacks.phase('Listening');
+          if (!players.delete(source) || players.size) return;
+          // Brief gaps between streamed chunks should keep the Speaking indicator steady.
+          playbackIdleTimer = setTimeout(() => {
+            playbackIdleTimer = undefined;
+            if (!closed && !pending) callbacks.phase('Listening');
+          }, 150);
         };
         const now = context.currentTime;
         const startAt = playbackCursor > now ? playbackCursor : now + 0.025;

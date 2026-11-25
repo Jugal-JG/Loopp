@@ -53,6 +53,7 @@ label { display: grid; gap: 5px; }
 .turn p { margin: 6px 0; line-height: 1.5; }
 .agent p { white-space: pre-line; }
 .step { font-size: .875rem; margin-top: 5px; color: var(--accent); }
+.step > span { display: inline-block; width: 1.1em; text-align: center; }
 .source { display: inline-block; margin: 3px 5px 0 0; font-size: .8rem; color: var(--accent); background: var(--tag); padding: 3px 7px; border-radius: 5px; }
 .controls { padding: 14px 20px; border-top: 1px solid var(--divider); }
 .wave { display: flex; align-items: center; gap: 3px; height: 27px; }
