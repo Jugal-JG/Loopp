@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { ServiceError } from './provider';
+import { ServiceError } from './provider.js';
 
 export const googleEnabled = () => Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET && process.env.APP_ORIGIN);
 export const adminEmail = () => process.env.ADMIN_EMAIL?.trim().toLowerCase();

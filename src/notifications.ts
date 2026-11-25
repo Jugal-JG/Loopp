@@ -1,4 +1,4 @@
-import { db } from './store';
+import { db } from './store.js';
 
 export async function deliverEmail(id: string) {
   const key = process.env.RESEND_API_KEY;

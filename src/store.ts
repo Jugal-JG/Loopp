@@ -1,8 +1,8 @@
 import pg from 'pg';
 import { randomUUID } from 'node:crypto';
-import { POLICY_VERSION, publicPlanDocuments, type Match } from './policies';
-import { embedding, ServiceError } from './provider';
-import type { Pending, Profile, Reply } from './agent';
+import { POLICY_VERSION, publicPlanDocuments, type Match } from './policies.js';
+import { embedding, ServiceError } from './provider.js';
+import type { Pending, Profile, Reply } from './agent.js';
 
 let pool: pg.Pool | undefined;
 export function db() {

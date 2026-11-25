@@ -1,7 +1,7 @@
 import { GoogleGenAI, Modality, type GenerateContentParameters } from '@google/genai';
 import { setTimeout as delay } from 'node:timers/promises';
-import type { Account, AgentInput, Decision, PlannerContext } from './agent';
-import type { Match } from './policies';
+import type { Account, AgentInput, Decision, PlannerContext } from './agent.js';
+import type { Match } from './policies.js';
 
 export const textModel = () => process.env.GEMINI_TEXT_MODEL || 'gemini-3.5-flash-lite';
 export const fallbackTextModel = () => process.env.GEMINI_TEXT_FALLBACK_MODEL || 'gemini-3.1-flash-lite';

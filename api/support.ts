@@ -1,12 +1,12 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { db, issueRefund, searchPolicy, takeBudget, type Turn } from '../src/store';
-import { decide, isRateLimit, ServiceError, speech, voiceToken, textModel, verifyEvidence } from '../src/provider';
-import { accounts, runSupportTurn, type Pending, type Profile, type Reply } from '../src/agent';
-import { adminEmail, cookie, googleEnabled, googleFinish, googleProfile, googleStart, isAdmin, readCookie, secretMatches } from '../src/identity';
-import { deliverEmail } from '../src/notifications';
-import { orpheusSpeech } from '../src/orpheus';
-import { playSpeechWithFallback } from '../src/speech-output';
+import { db, issueRefund, searchPolicy, takeBudget, type Turn } from '../src/store.js';
+import { decide, isRateLimit, ServiceError, speech, voiceToken, textModel, verifyEvidence } from '../src/provider.js';
+import { accounts, runSupportTurn, type Pending, type Profile, type Reply } from '../src/agent.js';
+import { adminEmail, cookie, googleEnabled, googleFinish, googleProfile, googleStart, isAdmin, readCookie, secretMatches } from '../src/identity.js';
+import { deliverEmail } from '../src/notifications.js';
+import { orpheusSpeech } from '../src/orpheus.js';
+import { playSpeechWithFallback } from '../src/speech-output.js';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const errors: Record<string, string> = {

@@ -1,4 +1,4 @@
-import { ServiceError } from './provider';
+import { ServiceError } from './provider.js';
 
 export const orpheusModel = 'canopylabs/orpheus-v1-english';
 

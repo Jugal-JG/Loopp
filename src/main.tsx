@@ -12,6 +12,15 @@ const labels: Record<string, string> = { verifyAccount: 'Verify account & contra
 const prompts = ['Refund my last charge', 'Where do I download my receipt?', 'How do I resend an invite?', 'How do I export my workspace?', 'Can I recover a deleted project?', 'What is the ZIP upload limit?'];
 const endpoint = (action: string) => `/api/support?action=${action}`;
 
+async function apiResponse(response: Response) {
+  const result = await response.json().catch(() => null);
+  if (!response.ok || !result) {
+    const requestId = response.headers.get('x-vercel-id') || response.headers.get('x-request-id');
+    throw new Error(result?.message ?? `The support service returned HTTP ${response.status}.${requestId ? ` Reference: ${requestId}.` : ''}`);
+  }
+  return result;
+}
+
 function App() {
   const [auth, setAuth] = useState<'checking' | 'signedOut' | 'ready'>('checking');
   const [passcode, setPasscode] = useState('');
@@ -45,8 +54,7 @@ function App() {
     try {
       const response = await fetch(endpoint('session'));
       if (response.status === 401) { setAuth('signedOut'); return; }
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.message);
+      const result = await apiResponse(response);
       setTurns(result.turns);
       setPending(result.pending);
       setIdentity(result.identity ?? { admin: false });
@@ -68,7 +76,7 @@ function App() {
     setAuth('checking');
     try {
       const response = await fetch(endpoint('login'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, passcode }) });
-      if (!response.ok) throw new Error((await response.json()).message);
+      await apiResponse(response);
       setPasscode('');
       await load();
     } catch (error) { setStatus((error as Error).message); setAuth('signedOut'); }
@@ -76,7 +84,7 @@ function App() {
   async function logout() {
     try {
       const response = await fetch(endpoint('logout'), { method: 'POST' });
-      if (!response.ok) throw new Error((await response.json()).message);
+      await apiResponse(response);
       location.assign('/');
     } catch (error) { setStatus((error as Error).message); }
   }
@@ -208,7 +216,7 @@ function App() {
     if (voice.current || voiceStart.current) await toggleVoice();
     try {
       const response = await fetch(endpoint('clear'), { method: 'POST' });
-      if (!response.ok) throw new Error((await response.json()).message);
+      await apiResponse(response);
       setTurns([]);
       setPending(undefined);
       setSelected('');

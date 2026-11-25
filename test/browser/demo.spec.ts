@@ -4,6 +4,20 @@ function sse(events: Array<[string, object]>) {
   return events.map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join('');
 }
 
+test('reports a plain-text login function failure with its request reference', async ({ page }) => {
+  await page.route('**/api/support?*', route => {
+    const action = new URL(route.request().url()).searchParams.get('action');
+    if (action === 'auth-options') return route.fulfill({ json: {} });
+    if (action === 'session') return route.fulfill({ status: 401, json: {} });
+    return route.fulfill({ status: 500, contentType: 'text/plain',
+      headers: { 'x-vercel-id': 'test-runtime-id' }, body: 'A server error has occurred' });
+  });
+  await page.goto('/');
+  await page.getByLabel('Passcode').fill('test-passcode');
+  await page.getByRole('button', { name: 'Open demo' }).click();
+  await expect(page.getByRole('alert')).toHaveText('The support service returned HTTP 500. Reference: test-runtime-id.');
+});
+
 test('reviews a pending human escalation and shows its saved status', async ({ page }) => {
   const ticket = { reference: 'HD-1234ABCD', reason: 'refund_ineligible', profile: 'basic', status: 'pending',
     created_at: '2026-11-24T12:00:00Z', request_text: 'Please refund my last charge.', messages: [] as { id: string; body: string }[] };

@@ -1,4 +1,4 @@
-import { chunks, type Match } from './policies';
+import { chunks, type Match } from './policies.js';
 
 export const PROMPT_VERSION = 'support-v2';
 export const MAX_STEPS = 6;
