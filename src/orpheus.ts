@@ -6,7 +6,6 @@ export async function orpheusSpeech(text: string, onAudio: (data: string, mime: 
   const key = process.env.GROQ_API_KEY?.trim();
   if (!key) throw new ServiceError('groq_not_configured', 503);
   const deadline = AbortSignal.timeout(12000);
-  const audio: string[] = [];
   let remaining = Array.from(text.trim());
   while (remaining.length) {
     const head = remaining.slice(0, 200).join('');
@@ -25,7 +24,6 @@ export async function orpheusSpeech(text: string, onAudio: (data: string, mime: 
     if (wav.length <= 44 || wav.toString('ascii', 0, 4) !== 'RIFF' || wav.toString('ascii', 8, 12) !== 'WAVE') {
       throw new ServiceError('groq_speech_failed', 502);
     }
-    audio.push(wav.toString('base64'));
+    if (!onAudio(wav.toString('base64'), 'audio/wav')) return;
   }
-  for (const chunk of audio) if (!onAudio(chunk, 'audio/wav')) break;
 }

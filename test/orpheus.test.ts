@@ -22,6 +22,7 @@ test('Orpheus uses Hannah, keeps each request within 200 characters, and preserv
   await orpheusSpeech(reply, (audio, mime) => {
     assert.equal(mime, 'audio/wav');
     played.push(Buffer.from(audio, 'base64')[45]);
+    assert.equal(inputs.length, played.length, 'play each chunk before requesting the next one');
     return true;
   });
   assert.ok(inputs.every(input => input.length <= 200));
