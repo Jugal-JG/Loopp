@@ -2,6 +2,8 @@
 
 Loopp is a customer support agent for a fictional SaaS workspace. It handles billing, subscriptions, account access, and workspace administration through streaming chat and interruptible voice. Both modes share conversation history, policy retrieval, and account controls. Refunds and human handoffs use simulated records.
 
+**Live demo** · [Open Loopp](https://loopp-psi.vercel.app)
+
 ## Reviewer scenarios
 
 | Scenario | What to try | Expected behavior |
@@ -64,7 +66,7 @@ The cosine score measures retrieval similarity. An accurate rank does not guaran
 | **Agentic Architecture & Tool Orchestration (35%)** | Bounded action loop, typed tools, tier-scoped retrieval, cosine threshold, structured source selection, independent evidence check, and explicit refund confirmation. | The live run exposed one evidence-verification failure even though the labeled policy ranked first. |
 | **Voice & Real-Time Streaming UX (25%)** | Live captions, streamed speech, input/output waveform, interruption, mute preserving captured text, and listening, transcribing, thinking, and speaking indicators. | Browser tests simulate transcription and audio events. Voice latency varies with providers and host CPU. |
 | **Code Quality & System Design (25%)** | React UI, typed agent and provider adapters, and separate policy/persistence modules. Type checking, integration tests, and build are reproducible. | Type checking, 18 unit and integration tests, 8 Chrome tests, and the production build passed. |
-| **Production Readiness (15%)** | Database-backed rate limits, concurrent turn leases, provider timeouts, recoverable turn IDs, and Vercel API configuration. | A deployed Pocket TTS service reachable by the API and a production smoke test are still pending. The reviewer scenarios provide a walkthrough outline. A recorded walkthrough was not found in this repo. |
+| **Production Readiness (15%)** | Database-backed rate limits, concurrent turn leases, provider timeouts, recoverable turn IDs, and Vercel API configuration. | The deployed app and API health endpoint respond. End-to-end production voice and recovery checks are not recorded here. The reviewer scenarios provide a walkthrough outline. A recorded walkthrough was not found in this repo. |
 
 ### Assignment checklist
 
@@ -80,7 +82,7 @@ The cosine score measures retrieval similarity. An accurate rank does not guaran
 ### Submission checklist
 
 - **GitHub repository.** Full source, `.env.example`, and README are present in the workspace. Commit and push the reviewed branch, then verify the reviewer can access the link. Keep real credentials out of the commit.
-- **Live prototype.** The repo contains a Vercel configuration. Verify a deployment of this version with reachable Pocket TTS, then run the chat, voice, and recovery scenarios on the deployed URL.
+- **Live prototype.** [Open the Loopp demo](https://loopp-psi.vercel.app) and use the reviewer scenarios above to try chat, voice, and recovery.
 - **Loom walkthrough.** Record a 3–5 minute screen-and-webcam walkthrough showing live chat, voice interruption, a multi-step tool flow, and RAG and guardrails.
 - **Submission email.** Reply in the assessment email thread within its seven-day window with the GitHub, live demo, and Loom links.
 
